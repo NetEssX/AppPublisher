@@ -112,6 +112,14 @@ EXTRA_BUILD_EXTENSIONS=.bin,.rom,.xapk
 - `GET /media/...` — 上传的图片，可直接在介绍页里用
 - `GET /docs` — FastAPI 自动生成的接口文档
 
+## 客户端接入
+
+**接入方（尤其是让 AI 写客户端代码的场景）请直接看 [`docs/client-integration.md`](docs/client-integration.md)。**
+那份文档是写给 AI 编码助手看的接入规范，包含完整的字段表、错误语义、
+必须遵守的约束、常见错误清单，以及可直接使用的 Kotlin 参考实现。
+
+下面是同一套接口的精简示例：
+
 ## 客户端检查更新示例（Kotlin）
 
 ```kotlin

@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 
 # 默认只监听回环：这是开发脚本，绑 0.0.0.0 会让同网段（甚至公网）都能直接摸到后台。
 HOST="${HOST:-127.0.0.1}"
-PORT="${PORT:-8000}"
+PORT="${PORT:-8123}"
 
 command -v python3 >/dev/null 2>&1 || { echo "找不到 python3，请先安装或加入 PATH" >&2; exit 1; }
 python3 -c 'import uvicorn' 2>/dev/null || {
