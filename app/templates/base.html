@@ -111,7 +111,10 @@
   </nav>
   <div class="spacer"></div>
   <span class="who">{{ user.display_name or user.username }}{% if user.is_super %} · 超管{% endif %}</span>
-  <form method="post" action="/admin/logout"><button class="ghost small">退出</button></form>
+  <form method="post" action="/admin/logout">
+    <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+    <button class="ghost small">退出</button>
+  </form>
 </header>
 {% endif %}
 <main>

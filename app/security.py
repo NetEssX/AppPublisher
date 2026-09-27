@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import logging
 import secrets
+import threading
 import time
 from typing import Any, Dict, Optional, Tuple
 
@@ -84,37 +85,119 @@ def csrf_token_for(session_token: str) -> str:
     ).hexdigest()[:40]
 
 
-# ---------------------------------------------------------------- 登录节流
+# ---------------------------------------------------------------- 登录页 CSRF（双提交）
 
-_failures: Dict[str, Tuple[int, float]] = {}
+def tokens_equal(left: str, right: str) -> bool:
+    """定时安全比较两个 token。
+
+    hmac.compare_digest 对 str 只接受纯 ASCII，遇到非 ASCII 会抛
+    TypeError("comparing strings with non-ASCII characters is not supported")。
+    这两个值一个来自表单、一个来自 Cookie，都是客户端可控的，
+    直接比会让 csrf_token=é 这样的请求变成 500 而不是干净的校验失败。
+    """
+    return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+
+
+def new_csrf_secret() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def csrf_cookie_value(request: Request) -> str:
+    return request.cookies.get(config.CSRF_COOKIE_NAME, "") or ""
+
+
+def double_submit_ok(request: Request, form_token: str) -> bool:
+    """Cookie 与表单里的随机值必须一致。
+
+    此时还没有会话可依托，所以用双提交：攻击者读不到受害者的 Cookie（同源策略），
+    因此无法把一个「恰好对得上」的值塞进跨站表单里。
+    """
+    cookie = csrf_cookie_value(request)
+    return bool(cookie) and bool(form_token) and tokens_equal(cookie, form_token)
+
+
+def set_csrf_cookie(response: Any, token: str) -> None:
+    response.set_cookie(
+        key=config.CSRF_COOKIE_NAME,
+        value=token,
+        max_age=config.SESSION_MAX_AGE,
+        httponly=True,
+        secure=config.COOKIE_SECURE,
+        samesite=config.COOKIE_SAMESITE,
+        path="/",
+    )
+
+
+# ---------------------------------------------------------------- 登录节流
+# 注意：这是进程内状态。多 worker 部署时各自计数，节流会退化，因此 uvicorn 固定 --workers 1。
+_failures: Dict[str, Tuple[int, float, float]] = {}
+_failures_lock = threading.Lock()
 _LOCK_AFTER = 5
 _LOCK_SECONDS = 300.0
+_MAX_TRACKED = 10_000
+
+
+def _sweep_locked(now: float) -> None:
+    """丢弃过期条目，并在超容量时做定向淘汰。
+
+    只按「锁定到期」清理是不够的：攻击者用大量一次性用户名各失败几次，永远不会进入锁定，
+    条目就会一直堆着。所以按最后一次失败时间过期，并留一个硬上限兜底。
+    """
+    stale = [key for key, (_, _, seen) in _failures.items() if now - seen > _LOCK_SECONDS]
+    for key in stale:
+        _failures.pop(key, None)
+
+    overflow = len(_failures) - _MAX_TRACKED
+    if overflow <= 0:
+        return
+
+    # 淘汰最旧且当前未锁定的条目。
+    # 这里不能整体 clear()：那会把正在生效的锁定一并抹掉，
+    # 攻击者只要先用一堆一次性用户名把表灌满、再打目标账号，
+    # 就能触发清理并让自己的锁定消失，节流形同虚设。
+    for key, (_, locked_until, _) in sorted(_failures.items(), key=lambda kv: kv[1][2]):
+        if overflow <= 0:
+            break
+        if locked_until > now:
+            continue
+        _failures.pop(key, None)
+        overflow -= 1
+
+    # 兜底：极端情况下（超过两倍上限）说明锁定条目本身也失控了，
+    # 此时按最旧优先继续丢，保证内存始终有界。
+    if len(_failures) > _MAX_TRACKED * 2:
+        for key in sorted(_failures, key=lambda k: _failures[k][2])[: len(_failures) - _MAX_TRACKED]:
+            _failures.pop(key, None)
 
 
 def login_locked_for(username: str) -> int:
     """若该账号处于锁定，返回剩余秒数，否则返回 0。"""
-    entry = _failures.get(username.lower())
-    if not entry:
+    now = time.time()
+    with _failures_lock:
+        _sweep_locked(now)
+        entry = _failures.get(username.lower())
+        if not entry:
+            return 0
+        count, locked_until, _ = entry
+        if count >= _LOCK_AFTER and locked_until > now:
+            return int(locked_until - now) + 1
         return 0
-    count, locked_until = entry
-    remaining = locked_until - time.time()
-    if count >= _LOCK_AFTER and remaining > 0:
-        return int(remaining) + 1
-    if remaining <= 0:
-        _failures.pop(username.lower(), None)
-    return 0
 
 
 def record_login_failure(username: str) -> None:
     key = username.lower()
-    count, _ = _failures.get(key, (0, 0.0))
-    count += 1
-    locked_until = time.time() + _LOCK_SECONDS if count >= _LOCK_AFTER else 0.0
-    _failures[key] = (count, locked_until)
+    now = time.time()
+    with _failures_lock:
+        _sweep_locked(now)
+        count, _, _ = _failures.get(key, (0, 0.0, now))
+        count += 1
+        locked_until = now + _LOCK_SECONDS if count >= _LOCK_AFTER else 0.0
+        _failures[key] = (count, locked_until, now)
 
 
 def clear_login_failures(username: str) -> None:
-    _failures.pop(username.lower(), None)
+    with _failures_lock:
+        _failures.pop(username.lower(), None)
 
 
 # ---------------------------------------------------------------- 依赖
@@ -161,7 +244,7 @@ def require_csrf(
 ) -> Dict[str, Any]:
     """所有写操作依赖它：既校验登录，也校验 CSRF。"""
     expected = user.get("csrf_token", "")
-    if not csrf_token or not hmac.compare_digest(csrf_token, expected):
+    if not csrf_token or not tokens_equal(csrf_token, expected):
         raise HTTPException(status_code=400, detail="CSRF 校验失败，请刷新页面后重试")
     return user
 

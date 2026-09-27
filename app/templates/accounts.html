@@ -25,19 +25,22 @@
         </td>
         <td class="muted">{{ row.created_at | format_time }}</td>
         <td style="text-align:right;white-space:nowrap">
+          {% if row.id != user.id %}
           <form method="post" action="/admin/accounts/{{ row.id }}/password" style="display:inline"
-                onsubmit="return confirm('确认重置 {{ row.username }} 的密码？该账号所有登录会失效。')">
+                onsubmit='return confirm({{ ("确认重置 " ~ row.username ~ " 的密码？该账号所有登录会失效。") | tojson }})'>
             <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
             <input type="password" name="new_password" placeholder="新密码" required minlength="8"
+                   autocomplete="new-password"
                    style="width:130px;display:inline-block;padding:5px 10px;font-size:12px">
             <button class="ghost small" type="submit">重置密码</button>
           </form>
-          {% if row.id != user.id %}
           <form method="post" action="/admin/accounts/{{ row.id }}/delete" style="display:inline"
-                onsubmit="return confirm('确认删除账号 {{ row.username }}？')">
+                onsubmit='return confirm({{ ("确认删除账号 " ~ row.username ~ "？") | tojson }})'>
             <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
             <button class="danger small" type="submit">删除</button>
           </form>
+          {% else %}
+          <span class="muted" style="font-size:12px">改自己的密码请走 <a href="/admin/profile">密码</a> 页</span>
           {% endif %}
         </td>
       </tr>

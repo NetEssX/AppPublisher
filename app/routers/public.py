@@ -30,6 +30,8 @@ router = APIRouter()
 
 _FALLBACK_MEDIA_TYPE = "application/octet-stream"
 _NO_CACHE = {"Cache-Control": "no-cache, no-store, must-revalidate"}
+# 列表接口的返回上限。客户端只需要最近的若干条，不设上限会随着发布次数增长把响应撑爆。
+_LIST_LIMIT = 100
 
 
 # ---------------------------------------------------------------- 内部工具
@@ -190,15 +192,17 @@ def releases_latest(request: Request, slug: str) -> JSONResponse:
 
 @router.get("/{slug}/releases")
 def releases_list(request: Request, slug: str) -> JSONResponse:
+    """最近的版本列表，最多 _LIST_LIMIT 条（按 versionCode 从新到旧）。"""
     app = load_enabled_app(slug)
     rows = db.query_all(
-        "SELECT * FROM releases WHERE app_id = ? ORDER BY version_code DESC, id DESC",
-        (app["id"],),
+        "SELECT * FROM releases WHERE app_id = ? ORDER BY version_code DESC, id DESC LIMIT ?",
+        (app["id"], _LIST_LIMIT),
     )
     for row in rows:
         row["app_name"] = app["name"]
     return JSONResponse(
-        release_list_payload(rows, app["slug"], base_url_for(request)), headers=_NO_CACHE
+        release_list_payload(rows, app["slug"], base_url_for(request), _LIST_LIMIT),
+        headers=_NO_CACHE,
     )
 
 
@@ -248,12 +252,13 @@ def notices_latest(slug: str) -> JSONResponse:
 
 @router.get("/{slug}/notices")
 def notices_list(slug: str) -> JSONResponse:
+    """最近的公告列表，最多 _LIST_LIMIT 条（按发布时间从新到旧）。"""
     app = load_enabled_app(slug)
     rows = db.query_all(
-        "SELECT * FROM notices WHERE app_id = ? ORDER BY published_at DESC, id DESC",
-        (app["id"],),
+        "SELECT * FROM notices WHERE app_id = ? ORDER BY published_at DESC, id DESC LIMIT ?",
+        (app["id"], _LIST_LIMIT),
     )
-    return JSONResponse(notice_list_payload(rows), headers=_NO_CACHE)
+    return JSONResponse(notice_list_payload(rows, _LIST_LIMIT), headers=_NO_CACHE)
 
 
 @router.get("/{slug}/notices/{notice_id}")

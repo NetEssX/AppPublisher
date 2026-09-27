@@ -25,7 +25,8 @@ def human_size(num_bytes: Optional[int]) -> str:
 
 
 def format_time(ms: Optional[int]) -> str:
-    if not ms:
+    # 用 is None 而不是 not ms：0 是合法的 epoch 起点，不该被当成「没有值」。
+    if ms is None:
         return "-"
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ms / 1000))
 
@@ -38,8 +39,15 @@ def redirect_with(url: str, ok: Optional[str] = None, err: Optional[str] = None)
     if err:
         params["err"] = err
     if params:
-        separator = "&" if "?" in url else "?"
-        url = f"{url}{separator}{urllib.parse.urlencode(params)}"
+        # 必须用 urlsplit 拆开再拼：直接往后接字符的话，
+        # "…/path#frag" 会把参数接到 fragment 里（永不发给服务端），
+        # "…/path?" 又会拼出 "?&ok=…" 这种空查询段。
+        query = urllib.parse.urlencode(params)
+        parts = urllib.parse.urlsplit(url)
+        merged = f"{parts.query}&{query}" if parts.query else query
+        url = urllib.parse.urlunsplit(
+            (parts.scheme, parts.netloc, parts.path, merged, parts.fragment)
+        )
     return RedirectResponse(url, status_code=303)
 
 

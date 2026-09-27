@@ -1,13 +1,27 @@
-# 运行期数据：数据库、上传的 APK 与图片、自动生成的密钥
-data/
+# 运行期数据：数据库、上传的构建产物与图片、自动生成的密钥
+# 用 /data/ 锚定根目录，避免将来出现 app/data/ 这类源码目录时被一并忽略。
+/data/
 
-# 本地配置（含管理员密码、SECRET_KEY），务必不要提交
-.env
+# 本地配置（含管理员密码、SECRET_KEY），务必不要提交。
+# 用通配符是为了把 .env.local / .env.production 这类变体一起挡住；示例文件例外保留。
+.env*
+!.env.example
 
 __pycache__/
 *.py[cod]
 .venv/
 venv/
+env/
+.virtualenv/
+
+# Python 工具缓存与构建产物
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
 
 # 编辑器 / 系统
 .idea/

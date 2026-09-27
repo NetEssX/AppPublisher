@@ -40,18 +40,24 @@ def notice_payload(notice: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def release_list_payload(releases: list, slug: str, base_url: str) -> Dict[str, Any]:
+def release_list_payload(
+    releases: list, slug: str, base_url: str, limit: int
+) -> Dict[str, Any]:
+    """列表响应。count 是本次实际返回条数，limit 是服务端上限；
+    两者相等时说明可能还有更早的记录没返回。"""
     return {
         "slug": slug,
         "count": len(releases),
+        "limit": limit,
         "generatedAt": now_ms(),
         "releases": [release_payload(row, slug, base_url) for row in releases],
     }
 
 
-def notice_list_payload(notices: list) -> Dict[str, Any]:
+def notice_list_payload(notices: list, limit: int) -> Dict[str, Any]:
     return {
         "count": len(notices),
+        "limit": limit,
         "generatedAt": now_ms(),
         "notices": [notice_payload(row) for row in notices],
     }

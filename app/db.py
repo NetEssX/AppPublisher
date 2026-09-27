@@ -7,14 +7,21 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from typing import Any, Iterator, Optional, Sequence
 
 from . import config
 
+logger = logging.getLogger("apppublisher.db")
+
 _local = threading.local()
+
+_WAL_ATTEMPTS = 20
+_WAL_RETRY_INTERVAL = 0.05
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -70,14 +77,34 @@ CREATE INDEX IF NOT EXISTS idx_notices_app ON notices (app_id, id DESC);
 """
 
 
+def _enable_wal(conn: sqlite3.Connection) -> None:
+    """把连接切到 WAL。
+
+    必须自己重试：多个进程同时冷启动时，各自都要把日志模式切成 WAL，
+    而 SQLite 在切换 journal_mode 这条路径上并不总是走 busy handler，
+    并发下会直接抛 SQLITE_BUSY，表现为启动即崩。实测 4 进程同时冷启动必现。
+    """
+    for _ in range(_WAL_ATTEMPTS):
+        try:
+            row = conn.execute("PRAGMA journal_mode = WAL").fetchone()
+        except sqlite3.OperationalError:
+            time.sleep(_WAL_RETRY_INTERVAL)
+            continue
+        if row and str(row[0]).lower() == "wal":
+            return
+        time.sleep(_WAL_RETRY_INTERVAL)
+    logger.warning("切换到 WAL 失败，继续以默认日志模式运行（功能正常，并发读性能略降）")
+
+
 def _connect() -> sqlite3.Connection:
     config.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(config.DB_PATH), timeout=15.0, isolation_level=None)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA foreign_keys = ON")
+    # busy_timeout 必须在其它 PRAGMA 之前设置，否则下面任何一条撞锁都不会等待。
     conn.execute("PRAGMA busy_timeout = 15000")
+    conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA synchronous = NORMAL")
+    _enable_wal(conn)
     return conn
 
 
@@ -89,7 +116,8 @@ def get_conn() -> sqlite3.Connection:
     return conn
 
 
-# 本版本的列名与建库时的列名不一致时，直接拒绝启动而不是静默错乱。
+# apk_* 时代的 releases 表已包含 app_id / version_code / force_update / is_latest /
+# released_at / created_at，只差改名这 4 列和新增的 content_type，所以下面的迁移是完整的。
 _LEGACY_COLUMN_SQL = """\
     ALTER TABLE releases RENAME COLUMN apk_path   TO build_path;
     ALTER TABLE releases RENAME COLUMN apk_name   TO build_name;
@@ -116,23 +144,46 @@ def _check_legacy_schema(conn: sqlite3.Connection) -> None:
 
 def init_db() -> None:
     conn = get_conn()
-    # 必须先查再建表：旧库上没有 app_id/version_code 列，SCHEMA 里的 CREATE INDEX
-    # 会先抛一句 "no such column"，把真正的原因盖掉。
+    # 先检查再建表：旧库列名与新版对不上，宁可在动任何东西之前就明确报错，
+    # 也不要先跑一遍 DDL 再失败。
     _check_legacy_schema(conn)
     conn.executescript(SCHEMA)
 
 
 @contextmanager
 def transaction() -> Iterator[sqlite3.Connection]:
-    """写事务。异常回滚，正常提交。"""
+    """写事务，可重入。异常回滚，正常提交。
+
+    连接是按线程缓存的，所以嵌套 with 会在同一个连接上重复 BEGIN IMMEDIATE，
+    SQLite 直接抛 "cannot start a transaction within a transaction"。
+    内层改用 SAVEPOINT，外层回滚时内层的部分修改也一并撤销。
+    """
     conn = get_conn()
-    conn.execute("BEGIN IMMEDIATE")
+    depth = getattr(_local, "tx_depth", 0)
+    savepoint = f"ap_sp_{depth}"
+
+    if depth == 0:
+        conn.execute("BEGIN IMMEDIATE")
+    else:
+        conn.execute(f"SAVEPOINT {savepoint}")
+    _local.tx_depth = depth + 1
+
     try:
         yield conn
     except Exception:
-        conn.execute("ROLLBACK")
+        if depth == 0:
+            conn.execute("ROLLBACK")
+        else:
+            conn.execute(f"ROLLBACK TO {savepoint}")
+            conn.execute(f"RELEASE {savepoint}")
         raise
-    conn.execute("COMMIT")
+    else:
+        if depth == 0:
+            conn.execute("COMMIT")
+        else:
+            conn.execute(f"RELEASE {savepoint}")
+    finally:
+        _local.tx_depth = depth
 
 
 def query_all(sql: str, params: Sequence[Any] = ()) -> list:

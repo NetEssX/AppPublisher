@@ -56,15 +56,15 @@ def _safe_target(subdir: str, filename: str, allowed_ext: FrozenSet[str]) -> Pat
             detail=f"不支持的文件类型 {suffix or '(无扩展名)'}，仅允许：{allowed}",
         )
 
-    target_dir = config.UPLOAD_DIR / subdir
-    target_dir.mkdir(parents=True, exist_ok=True)
-    dest = target_dir / f"{secrets.token_hex(16)}{extension}"
-
-    # 双保险：确认最终路径仍在 UPLOAD_DIR 之内。
+    # 必须先校验再 mkdir：pathlib 的 `/` 遇到绝对路径会丢弃左边，
+    # 若 subdir 是 "/tmp/x" 或含 ".."，mkdir 会先把目录建在外面，之后的检查就晚了。
     root = config.UPLOAD_DIR.resolve()
-    if root not in dest.resolve().parents:
+    target_dir = (config.UPLOAD_DIR / subdir).resolve()
+    if target_dir != root and root not in target_dir.parents:
         raise HTTPException(status_code=400, detail="非法的目标路径")
-    return dest
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    return target_dir / f"{secrets.token_hex(16)}{extension}"
 
 
 def save_upload(
@@ -77,10 +77,11 @@ def save_upload(
     if file is None or not file.filename:
         raise HTTPException(status_code=400, detail="请选择要上传的文件")
 
-    dest = _safe_target(subdir, file.filename, allowed_ext)
-    digest = hashlib.sha256()
-    size = 0
+    dest: Optional[Path] = None
     try:
+        dest = _safe_target(subdir, file.filename, allowed_ext)
+        digest = hashlib.sha256()
+        size = 0
         with dest.open("wb") as handle:
             while True:
                 chunk = file.file.read(_CHUNK)
@@ -94,20 +95,24 @@ def save_upload(
                     )
                 digest.update(chunk)
                 handle.write(chunk)
+        if size == 0:
+            raise HTTPException(status_code=400, detail="上传的文件是空的")
     except Exception:
-        dest.unlink(missing_ok=True)
+        if dest is not None:
+            dest.unlink(missing_ok=True)
         raise
     finally:
+        # 关闭放在最外层：_safe_target 会在建目录之前就拒绝非法扩展名，
+        # 那条常见路径若不在 finally 覆盖范围内，底层的临时文件就一直不释放。
         try:
             file.file.close()
         except Exception:  # noqa: BLE001 - 关闭失败不影响主流程
             pass
 
-    if size == 0:
-        dest.unlink(missing_ok=True)
-        raise HTTPException(status_code=400, detail="上传的文件是空的")
-
-    return dest.relative_to(config.UPLOAD_DIR).as_posix(), size, digest.hexdigest()
+    # 用 resolve() 后的根来算相对路径：_safe_target 返回的 dest 已经解过符号链接，
+    # 若这里拿未解析的 UPLOAD_DIR 去比较，macOS 上 /var → /private/var 会直接抛
+    # ValueError("is not in the subpath of")。
+    return dest.relative_to(config.UPLOAD_DIR.resolve()).as_posix(), size, digest.hexdigest()
 
 
 def safe_display_name(filename: Optional[str], fallback: str) -> str:

@@ -167,7 +167,8 @@
           </form>
           {% endif %}
           <form method="post" action="/admin/apps/{{ app.id }}/releases/{{ release.id }}/delete"
-                style="display:inline" onsubmit="return confirm('确认删除 {{ release.version_name }}？构建产物文件也会被删除。')">
+                style="display:inline"
+                onsubmit='return confirm({{ ("确认删除 " ~ release.version_name ~ "？构建产物文件也会被删除。") | tojson }})'>
             <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
             <button class="danger small" type="submit">删除</button>
           </form>
@@ -245,7 +246,8 @@
         <td class="mono">{{ notice.id }}</td>
         <td style="text-align:right;white-space:nowrap">
           <form method="post" action="/admin/apps/{{ app.id }}/notices/{{ notice.id }}/delete"
-                style="display:inline" onsubmit="return confirm('确认删除公告「{{ notice.title }}」？')">
+                style="display:inline"
+                onsubmit='return confirm({{ ("确认删除公告「" ~ notice.title ~ "」？") | tojson }})'>
             <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
             <button class="danger small" type="submit">删除</button>
           </form>
@@ -287,7 +289,7 @@
   <h2>删除应用</h2>
   <p class="hint">会一并删除该应用的全部发行版、构建产物文件与公告，且无法撤销。</p>
   <form method="post" action="/admin/apps/{{ app.id }}/delete"
-        onsubmit="return confirm('确认删除应用「{{ app.name }}」及其全部发行版？此操作不可撤销。')">
+        onsubmit='return confirm({{ ("确认删除应用「" ~ app.name ~ "」及其全部发行版？此操作不可撤销。") | tojson }})'>
     <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
     <button class="danger" type="submit">删除「{{ app.name }}」</button>
   </form>

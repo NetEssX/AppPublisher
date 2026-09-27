@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import re
 import secrets
+import time
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -71,6 +72,8 @@ SESSION_MAX_AGE = _int_env("SESSION_MAX_AGE", 60 * 60 * 24 * 7)
 # 仅在 HTTPS 下开启；本地 http 调试时必须为 0，否则浏览器不保存 Cookie。
 COOKIE_SECURE = _bool_env("COOKIE_SECURE", False)
 COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "lax").strip().lower() or "lax"
+# 登录页专用的 CSRF Cookie（双提交校验）。此时还没有会话，所以单独放一个随机值。
+CSRF_COOKIE_NAME = os.getenv("CSRF_COOKIE_NAME", "apppublisher_csrf")
 
 # ---------------------------------------------------------------- 上传限制
 # 兼容旧配置名 MAX_APK_MB：MAX_BUILD_MB 没设时回落到它。
@@ -119,7 +122,9 @@ def _extra_build_extensions() -> set:
 
 
 BUILD_EXTENSIONS = frozenset(set(CONTENT_TYPES) | _extra_build_extensions())
-IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".bmp"})
+# 刻意不收 .svg：/media 用 StaticFiles 直出，SVG 会以内联 image/svg+xml 渲染成文档，
+# 其中的 <script> 就能在本站源下执行（存储型 XSS）。产物走 /build 是强制 attachment 的，不受影响。
+IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp"})
 HTML_EXTENSIONS = frozenset({".html", ".htm", ".txt"})
 
 # ---------------------------------------------------------------- 初始管理员
@@ -150,29 +155,68 @@ RESERVED_SLUGS = frozenset(
 SLUG_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,62}[A-Za-z0-9])?$")
 
 
+_KEY_READ_ATTEMPTS = 50
+_KEY_READ_INTERVAL = 0.02
+
+
+def _read_key_file(key_file: Path) -> str:
+    """读密钥文件。刚被别的进程创建、还没写完时短暂重试，而不是拿个空值走人。"""
+    for _ in range(_KEY_READ_ATTEMPTS):
+        try:
+            value = key_file.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            # 文件还不存在：直接交给下面的 O_CREAT|O_EXCL 去抢占。
+            # 在这里空转重试的话，每次全新安装都要白等满 1 秒才继续。
+            return ""
+        if value:
+            return value
+        time.sleep(_KEY_READ_INTERVAL)
+    return ""
+
+
 def _load_secret_key() -> str:
-    """读取 SECRET_KEY；未配置时生成一次并落盘，保证重启后会话不失效。"""
+    """读取 SECRET_KEY；未配置时由抢到的那个进程创建一次，其余进程复用它。
+
+    用 O_CREAT|O_EXCL 抢占，只有抢到的进程负责写入。单纯「写临时文件再 os.replace」
+    是不够的：两个同时启动的 worker 会各自 replace 一次，各自保留自己内存里的 key，
+    最后互相签发的 Cookie 都验不过——正是这个函数要避免的问题。
+    """
     configured = os.getenv("SECRET_KEY", "").strip()
     if configured:
         return configured
 
-    key_file = DATA_DIR / ".secret_key"
-    if key_file.is_file():
-        existing = key_file.read_text(encoding="utf-8").strip()
-        if existing:
-            return existing
-
-    generated = secrets.token_urlsafe(48)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    key_file.write_text(generated, encoding="utf-8")
+    key_file = DATA_DIR / ".secret_key"
+
+    existing = _read_key_file(key_file)
+    if existing:
+        return existing
+
     try:
-        os.chmod(key_file, 0o600)
-    except OSError:
-        pass
+        # 0o600 不含 group/other 位，umask 只能再收紧、无法放宽。
+        fd = os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        winner = _read_key_file(key_file)
+        if winner:
+            return winner
+        raise RuntimeError(
+            f"{key_file} 存在但内容为空，可能是上次启动中途失败留下的。"
+            "请删除该文件（会让所有已登录会话失效），或在 .env 里显式配置 SECRET_KEY。"
+        )
+
+    # 这里直接返回自己生成的值，而不是回读文件：本进程是 O_EXCL 抢到的唯一写入者，
+    # 回读只会在极端情况下拿到空串，而空的 SECRET_KEY 会让会话可被伪造且毫无报错。
+    generated = secrets.token_urlsafe(48)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(generated)
     return generated
 
 
 SECRET_KEY = _load_secret_key()
+if not SECRET_KEY:
+    # 空密钥能让 URLSafeTimedSerializer 正常签名，会话就变成可任意伪造，且毫无报错。
+    # 宁可启动失败也不要静默地不安全。
+    raise RuntimeError("SECRET_KEY 为空，拒绝启动：空密钥签发的会话可被任意伪造。")
 
 
 def ensure_dirs() -> None:

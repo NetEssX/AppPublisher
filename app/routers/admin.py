@@ -91,6 +91,11 @@ def read_intro_text(intro_html: str, intro_file: Optional[UploadFile]) -> str:
     """介绍页正文：上传的 HTML 文件优先于文本框内容。"""
     if intro_file is not None and intro_file.filename:
         try:
+            # accept 属性只是给文件选择框用的提示，不是安全边界，服务端必须自己校验。
+            if storage.match_extension(intro_file.filename, config.HTML_EXTENSIONS) is None:
+                raise HTTPException(
+                    status_code=400, detail="介绍页文件只接受 .html / .htm / .txt"
+                )
             raw = intro_file.file.read(config.MAX_INTRO_BYTES + 1)
         finally:
             try:
@@ -122,15 +127,27 @@ def login_page(request: Request, next: str = "/admin") -> HTMLResponse:
     token = security.get_session_token(request)
     if token and security.read_session_token(token) is not None:
         return RedirectResponse(safe_next(next), status_code=303)
-    return render(request, "login.html", next_url=safe_next(next))
+
+    # 登录页还没有会话可用，改用双提交：同一个随机值既进 Cookie 也进表单。
+    # 攻击者读不到受害者的 Cookie，所以没法把「对得上」的值塞进跨站表单。
+    csrf = security.csrf_cookie_value(request) or security.new_csrf_secret()
+    response = render(request, "login.html", next_url=safe_next(next), csrf_token=csrf)
+    if security.csrf_cookie_value(request) != csrf:
+        security.set_csrf_cookie(response, csrf)
+    return response
 
 
 @router.post("/login")
 def login_submit(
+    request: Request,
     username: str = Form(...),
     password: str = Form(...),
     next: str = Form("/admin"),
+    csrf_token: str = Form(""),
 ) -> RedirectResponse:
+    if not security.double_submit_ok(request, csrf_token):
+        return redirect_with("/admin/login", err="表单已过期，请重新提交")
+
     username = username.strip()
     target = safe_next(next)
 
@@ -152,7 +169,7 @@ def login_submit(
 
 
 @router.post("/logout")
-def logout() -> RedirectResponse:
+def logout(user: Dict[str, Any] = Depends(security.require_csrf)) -> RedirectResponse:
     response = RedirectResponse("/admin/login", status_code=303)
     security.clear_session_cookie(response)
     return response
@@ -167,14 +184,28 @@ def dashboard(
     request: Request, user: Dict[str, Any] = Depends(security.get_current_user)
 ) -> HTMLResponse:
     apps = db.query_all("SELECT * FROM apps ORDER BY id DESC")
+
+    # 三条聚合查询搞定，避免每个应用各查 3 次的 N+1。
+    release_counts = {
+        row["app_id"]: row["total"]
+        for row in db.query_all("SELECT app_id, COUNT(*) AS total FROM releases GROUP BY app_id")
+    }
+    notice_counts = {
+        row["app_id"]: row["total"]
+        for row in db.query_all("SELECT app_id, COUNT(*) AS total FROM notices GROUP BY app_id")
+    }
+    # 每个应用取一行：SQL 侧排好序，Python 侧 setdefault 取首行即为该应用的「最新」。
+    latest_by_app: Dict[int, Dict[str, Any]] = {}
+    for row in db.query_all(
+        "SELECT id, app_id, version_name, version_code, is_latest FROM releases "
+        "ORDER BY app_id, is_latest DESC, version_code DESC, id DESC"
+    ):
+        latest_by_app.setdefault(row["app_id"], row)
+
     for app in apps:
-        app["release_count"] = (
-            db.query_value("SELECT COUNT(*) FROM releases WHERE app_id = ?", (app["id"],)) or 0
-        )
-        app["notice_count"] = (
-            db.query_value("SELECT COUNT(*) FROM notices WHERE app_id = ?", (app["id"],)) or 0
-        )
-        app["latest"] = find_latest_release(app["id"])
+        app["release_count"] = release_counts.get(app["id"], 0)
+        app["notice_count"] = notice_counts.get(app["id"], 0)
+        app["latest"] = latest_by_app.get(app["id"])
     return render(request, "apps.html", user=user, apps=apps)
 
 
@@ -190,7 +221,6 @@ def app_new(
 
 @router.post("/apps")
 def app_create(
-    request: Request,
     user: Dict[str, Any] = Depends(security.require_csrf),
     slug: str = Form(...),
     name: str = Form(...),
@@ -267,7 +297,6 @@ def app_detail(
 
 @router.post("/apps/{app_id}")
 def app_update(
-    request: Request,
     app_id: int,
     user: Dict[str, Any] = Depends(security.require_csrf),
     slug: str = Form(...),
@@ -316,8 +345,12 @@ def app_delete(
     ]
     db.execute("DELETE FROM apps WHERE id = ?", (app_id,))
     # 数据库记录先删干净，再清磁盘；反之若中途失败会留下悬空记录。
+    # 单个文件删不掉（权限等）不该让整个请求 500，记日志继续。
     for path in build_paths:
-        storage.delete(path)
+        try:
+            storage.delete(path)
+        except OSError:
+            logger.warning("删除产物文件失败，磁盘上可能残留 %s", path, exc_info=True)
     return redirect_with("/admin", ok=f"应用「{app['name']}」及其发行版已删除")
 
 
@@ -345,7 +378,6 @@ def image_upload(
 
 @router.post("/apps/{app_id}/releases")
 def release_create(
-    request: Request,
     app_id: int,
     user: Dict[str, Any] = Depends(security.require_csrf),
     version_name: str = Form(...),
@@ -448,6 +480,7 @@ def release_update(
     if not version_name:
         return redirect_with(target, err="版本名不能为空")
 
+    parsed_time = parse_local_datetime(released_at)
     db.execute(
         "UPDATE releases SET version_name = ?, description = ?, force_update = ?, released_at = ? "
         "WHERE id = ?",
@@ -455,10 +488,12 @@ def release_update(
             version_name,
             description or "",
             1 if force_update else 0,
-            parse_local_datetime(released_at) or release["released_at"],
+            parsed_time or release["released_at"],
             release_id,
         ),
     )
+    if released_at.strip() and parsed_time is None:
+        return redirect_with(target, ok="发行版已更新，但发布时间无法识别，已保留原时间")
     return redirect_with(target, ok="发行版已更新")
 
 
@@ -494,17 +529,25 @@ def release_delete(
     if release is None:
         return redirect_with(target, err="发行版不存在")
 
-    db.execute("DELETE FROM releases WHERE id = ?", (release_id,))
-    storage.delete(release["build_path"])
+    # 补 latest 和删记录放进同一个事务：若先删文件再补，文件删除一失败就会留下
+    # 「应用没有任何 latest」的坏状态；磁盘上多个孤儿文件则可以事后清理。
+    with db.transaction() as conn:
+        db.execute_tx(conn, "DELETE FROM releases WHERE id = ?", (release_id,))
+        if release["is_latest"]:
+            fallback = db.query_one(
+                "SELECT id FROM releases WHERE app_id = ? "
+                "ORDER BY version_code DESC, id DESC LIMIT 1",
+                (app_id,),
+            )
+            if fallback:
+                db.execute_tx(
+                    conn, "UPDATE releases SET is_latest = 1 WHERE id = ?", (fallback["id"],)
+                )
 
-    # 删掉的正好是 latest，就补一个（versionCode 最大的那个）。
-    if release["is_latest"]:
-        fallback = db.query_one(
-            "SELECT id FROM releases WHERE app_id = ? ORDER BY version_code DESC, id DESC LIMIT 1",
-            (app_id,),
-        )
-        if fallback:
-            db.execute("UPDATE releases SET is_latest = 1 WHERE id = ?", (fallback["id"],))
+    try:
+        storage.delete(release["build_path"])
+    except OSError:
+        logger.warning("删除产物文件失败，磁盘上可能残留 %s", release["build_path"], exc_info=True)
 
     return redirect_with(target, ok=f"已删除 {release['version_name']}")
 
@@ -556,15 +599,18 @@ def notice_update(
     if not title:
         return redirect_with(target, err="公告标题不能为空")
 
+    parsed_time = parse_local_datetime(published_at)
     db.execute(
         "UPDATE notices SET title = ?, content = ?, published_at = ? WHERE id = ?",
         (
             title,
             content or "",
-            parse_local_datetime(published_at) or notice["published_at"],
+            parsed_time or notice["published_at"],
             notice_id,
         ),
     )
+    if published_at.strip() and parsed_time is None:
+        return redirect_with(target, ok="公告已更新，但发布时间无法识别，已保留原时间")
     return redirect_with(target, ok="公告已更新")
 
 
@@ -612,6 +658,17 @@ def profile_change_password(
 
     new_hash = security.hash_password(new_password)
     db.execute("UPDATE users SET password_hash = ? WHERE id = ?", (new_hash, user["id"]))
+
+    # 初始口令文件属于初始管理员（config.ADMIN_USERNAME），只有本人在「密码」页改密
+    # 才让它作废。别的账号改自己的密码跟它无关——无差别删除会让初始管理员在忘记口令、
+    # 会话又过期之后，既进不去后台、也没文件可查。
+    # 按用户名比对：若 ADMIN_USERNAME 在初始化之后被改过，两边对不上，文件会留下。
+    # 宁可留一个陈旧的 0600 文件，也不要误删仍然有效的凭据。
+    if user["username"].lower() == config.ADMIN_USERNAME.lower():
+        try:
+            (config.DATA_DIR / ".initial_admin_password").unlink(missing_ok=True)
+        except OSError:
+            logger.warning("删除初始密码文件失败", exc_info=True)
 
     # 换发新 token，否则当前会话会被自己的改密逻辑踢掉。
     response = redirect_with(target, ok="密码已更新")
@@ -676,11 +733,15 @@ def account_reset_password(
     if len(new_password) < 8:
         return redirect_with(target, err="密码至少 8 位")
 
-    db.execute(
-        "UPDATE users SET password_hash = ? WHERE id = ?",
-        (security.hash_password(new_password), user_id),
-    )
-    return redirect_with(target, ok=f"已重置 {target_user['username']} 的密码")
+    new_hash = security.hash_password(new_password)
+    db.execute("UPDATE users SET password_hash = ? WHERE id = ?", (new_hash, user_id))
+
+    response = redirect_with(target, ok=f"已重置 {target_user['username']} 的密码")
+    if user_id == user["id"]:
+        # 重置的是自己：会话 token 与口令哈希绑定，不换发就会被自己踢下线，
+        # 而 accounts 页不像 profile 页那样会重新签发。
+        security.set_session_cookie(response, security.create_session_token(user_id, new_hash))
+    return response
 
 
 @router.post("/accounts/{user_id}/delete")
@@ -695,10 +756,13 @@ def account_delete(
     if user_id == user["id"]:
         return redirect_with(target, err="不能删除当前登录的账号")
 
-    if target_user["is_super"]:
-        super_count = db.query_value("SELECT COUNT(*) FROM users WHERE is_super = 1") or 0
-        if super_count <= 1:
-            return redirect_with(target, err="至少要保留一个超级管理员")
+    # 校验与删除必须在同一个写事务里：两个并发的删除会各自读到 super_count == 2，
+    # 双双通过校验后都执行删除，最终一个超管都不剩，谁也进不了后台。
+    with db.transaction() as conn:
+        if target_user["is_super"]:
+            super_count = db.query_value("SELECT COUNT(*) FROM users WHERE is_super = 1") or 0
+            if super_count <= 1:
+                return redirect_with(target, err="至少要保留一个超级管理员")
+        db.execute_tx(conn, "DELETE FROM users WHERE id = ?", (user_id,))
 
-    db.execute("DELETE FROM users WHERE id = ?", (user_id,))
     return redirect_with(target, ok=f"账号 {target_user['username']} 已删除")
