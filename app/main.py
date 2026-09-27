@@ -13,7 +13,7 @@ from typing import AsyncIterator
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from . import config, db, security
+from . import analytics, config, db, security
 from .routers import admin as admin_routes
 from .routers import public as public_routes
 
@@ -80,6 +80,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     config.ensure_dirs()
     db.init_db()
     bootstrap_admin()
+    # 清理是维护动作，不是启动的前置条件：失败只记日志，不要让服务起不来。
+    try:
+        analytics.purge_old_events()
+    except Exception:  # noqa: BLE001
+        logger.warning("启动时清理统计明细失败", exc_info=True)
     logger.info("数据目录: %s", config.DATA_DIR)
     logger.info("对外地址: %s", config.PUBLIC_BASE_URL or "(按请求 Host 动态推断)")
     yield

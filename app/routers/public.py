@@ -8,25 +8,31 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.templating import Jinja2Templates
 from starlette.responses import HTMLResponse
 
-from .. import config, db, storage
+from .. import analytics, config, db, storage
 from ..serializers import (
     notice_list_payload,
     notice_payload,
     release_list_payload,
     release_payload,
 )
-from ..utils import escape
+from ..utils import escape, format_time, human_size
 
 logger = logging.getLogger("apppublisher.public")
 
 router = APIRouter()
+templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
+templates.env.filters["human_size"] = human_size
+templates.env.filters["format_time"] = format_time
 
 _FALLBACK_MEDIA_TYPE = "application/octet-stream"
 _NO_CACHE = {"Cache-Control": "no-cache, no-store, must-revalidate"}
@@ -64,6 +70,21 @@ def find_latest_release(app_id: int) -> Optional[Dict[str, Any]]:
             (app_id,),
         )
     return row
+
+
+def latest_releases_by_app() -> Dict[int, Dict[str, Any]]:
+    """一次查出每个应用的最新版本，避免按应用逐个查的 N+1。
+
+    「最新」= is_latest 优先，其次 versionCode 最大。SQL 侧排序，
+    Python 侧 setdefault 取首行即为该应用的最新版本。
+    """
+    result: Dict[int, Dict[str, Any]] = {}
+    for row in db.query_all(
+        "SELECT id, app_id, version_name, version_code, is_latest, released_at, build_size "
+        "FROM releases ORDER BY app_id, is_latest DESC, version_code DESC, id DESC"
+    ):
+        result.setdefault(row["app_id"], row)
+    return result
 
 
 def find_latest_notice(app_id: int) -> Optional[Dict[str, Any]]:
@@ -107,44 +128,47 @@ def _fallback_page(app: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------- 站点入口
 
 
-@router.get("/", response_class=HTMLResponse)
-def site_index() -> HTMLResponse:
-    """站点根页：列出所有已上线的应用，方便自己点进去看。"""
-    apps = db.query_all(
-        "SELECT slug, name, updated_at FROM apps WHERE enabled = 1 ORDER BY name COLLATE NOCASE"
-    )
-    if apps:
-        items = "\n".join(
-            f'<li><a href="/{escape(row["slug"])}">{escape(row["name"])}</a>'
-            f'<code>/{escape(row["slug"])}</code></li>'
-            for row in apps
-        )
-        body = f'<ul class="apps">{items}</ul>'
-    else:
-        body = '<p class="empty">还没有已上线的应用。</p>'
+def _accent_for(slug: str) -> int:
+    """由短链稳定推导一个色相角，用作没有 banner 时的渐变占位底色。"""
+    digest = hashlib.sha256(slug.encode("utf-8")).hexdigest()
+    return int(digest[:8], 16) % 360
 
-    html = f"""<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>应用列表</title>
-<style>
-  body {{ margin:0; background:#0f1115; color:#e6e9ef; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }}
-  .wrap {{ max-width:720px; margin:0 auto; padding:56px 24px; }}
-  h1 {{ font-size:24px; margin:0 0 24px; }}
-  ul.apps {{ list-style:none; padding:0; margin:0; }}
-  ul.apps li {{ display:flex; align-items:center; justify-content:space-between; gap:16px;
-                padding:16px 20px; background:#171a21; border:1px solid #232833; border-radius:12px; margin-bottom:10px; }}
-  ul.apps a {{ color:#e6e9ef; text-decoration:none; font-size:16px; }}
-  ul.apps a:hover {{ color:#60a5fa; }}
-  code {{ color:#7d8698; font-size:12px; }}
-  .empty {{ color:#8b93a7; }}
-</style>
-</head>
-<body><div class="wrap"><h1>应用列表</h1>{body}</div></body>
-</html>"""
-    return HTMLResponse(html, headers={"X-Content-Type-Options": "nosniff"})
+
+@router.get("/", response_class=HTMLResponse)
+def site_index(request: Request) -> HTMLResponse:
+    """站点根页：卡片式列出所有已上线的应用。"""
+    # 只取卡片要用的列：intro_html 可能有几 MB，SELECT * 会把每个应用的整页 HTML
+    # 都读进内存，而根页一个字节都用不到。
+    apps = db.query_all(
+        "SELECT id, slug, name, tagline, banner_path FROM apps "
+        "WHERE enabled = 1 ORDER BY name COLLATE NOCASE"
+    )
+    latest_by_app = latest_releases_by_app()
+
+    cards = []
+    for app in apps:
+        latest = latest_by_app.get(app["id"])
+        cards.append(
+            {
+                "slug": app["slug"],
+                "name": app["name"],
+                "tagline": app["tagline"] or "",
+                "banner_url": f"/media/{app['banner_path']}" if app["banner_path"] else "",
+                "accent": _accent_for(app["slug"]),
+                "initial": (app["name"] or app["slug"])[:1].upper(),
+                "latest_version": latest["version_name"] if latest else "",
+                "latest_code": latest["version_code"] if latest else None,
+                "released_at": latest["released_at"] if latest else None,
+                "size": latest["build_size"] if latest else 0,
+            }
+        )
+
+    return templates.TemplateResponse(
+        request,
+        "index.html",
+        {"cards": cards, "total": len(cards)},
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-cache"},
+    )
 
 
 @router.get("/favicon.ico")
@@ -160,12 +184,45 @@ def health() -> Dict[str, Any]:
 # ---------------------------------------------------------------- 介绍页
 
 
+@router.get("/{slug}/s/{code}")
+def share_redirect(request: Request, slug: str, code: str) -> RedirectResponse:
+    """分享链接入口：记一次点击、写下分享码，然后跳到目标页。
+
+    分享码不存在或已停用时**照常跳转**，只是不归因 —— 已经发出去的链接
+    不该因为后台删了记录就甩个 404 到别人脸上。
+    """
+    app = load_enabled_app(slug)
+    link = db.query_one(
+        "SELECT * FROM share_links WHERE app_id = ? AND code = ? AND enabled = 1",
+        (app["id"], code.strip().lower()),
+    )
+
+    if link is not None:
+        # 显式传 code：这一刻 Cookie 还没写下去，自动推断拿不到。
+        analytics.record(
+            request, app["id"], analytics.KIND_SHARE_CLICK, share_code=link["code"]
+        )
+
+    target = f"/{app['slug']}"
+    if link is not None and link["target"] == "download":
+        latest = find_latest_release(app["id"])
+        if latest is not None:
+            target = f"/{app['slug']}/build/{latest['version_code']}"
+
+    # 302 而不是 301：链接的目标会随「最新版」变化，也便于日后停用某个码。
+    response = RedirectResponse(target, status_code=302)
+    if link is not None:
+        analytics.set_share_cookie(response, link["code"])
+    return response
+
+
 @router.get("/{slug}", response_class=HTMLResponse)
-def app_intro(slug: str) -> HTMLResponse:
+def app_intro(request: Request, slug: str) -> HTMLResponse:
     """返回后台粘贴/上传的 HTML 原文。"""
     app = load_enabled_app(slug)
+    analytics.record(request, app["id"], analytics.KIND_VIEW)
     html = app["intro_html"] or _fallback_page(app)
-    return HTMLResponse(
+    response = HTMLResponse(
         html,
         headers={
             # 内容由站点管理员自行提供，这里只做基础的 MIME 嗅探防护。
@@ -174,6 +231,13 @@ def app_intro(slug: str) -> HTMLResponse:
             "Cache-Control": "no-cache",
         },
     )
+
+    # 有人直接用带 ?ref= 的地址（而不是走 /s/{code} 跳转）时，
+    # 把分享码补写进 Cookie，后续的下载与更新检查才能继续归因。
+    ref = (request.query_params.get("ref") or "").strip().lower()
+    if ref and analytics.SHARE_CODE_RE.match(ref) and not analytics.share_code_from_cookie(request):
+        analytics.set_share_cookie(response, ref)
+    return response
 
 
 # ---------------------------------------------------------------- 更新检查
@@ -186,6 +250,7 @@ def releases_latest(request: Request, slug: str) -> JSONResponse:
     if release is None:
         raise HTTPException(status_code=404, detail="该应用还没有发布任何版本")
     release["app_name"] = app["name"]
+    analytics.record(request, app["id"], analytics.KIND_UPDATE_CHECK)
     payload = release_payload(release, app["slug"], base_url_for(request))
     return JSONResponse(payload, headers=_NO_CACHE)
 
@@ -207,7 +272,7 @@ def releases_list(request: Request, slug: str) -> JSONResponse:
 
 
 @router.get("/{slug}/build/{version_code}")
-def release_build(slug: str, version_code: int) -> FileResponse:
+def release_build(request: Request, slug: str, version_code: int) -> FileResponse:
     """按 versionCode 分发构建产物。用版本号而非版本名定位，改版本名不会让旧链接失效。"""
     app = load_enabled_app(slug)
     release = db.query_one(
@@ -227,6 +292,9 @@ def release_build(slug: str, version_code: int) -> FileResponse:
             release["build_path"],
         )
         raise HTTPException(status_code=410, detail="安装包已不可用，请联系开发者")
+
+    # 只在确认文件存在、真的要下发时才计数；410 那条路径不算一次下载。
+    analytics.record(request, app["id"], analytics.KIND_DOWNLOAD, release["id"])
 
     return FileResponse(
         path,

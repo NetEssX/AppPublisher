@@ -1,0 +1,115 @@
+{# 分享链接面板。上下文：app、share_links、share_target_labels、stats、base_url（见 admin.app_detail）。 #}
+<div class="card">
+  <h2>生成分享链接</h2>
+  <p class="hint">
+    每个链接带一个独立短码。别人点开后会被记一次「分享链接点击」，
+    该访客后续的介绍页访问与下载也会归到这个链接名下 —— 于是你能看出
+    哪个平台真正带来了量。备注只给自己看，会显示在下面的表里。
+  </p>
+
+  <form method="post" action="/admin/apps/{{ app.id }}/share">
+    <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+    <div class="row">
+      <div style="flex:2">
+        <label>备注（这个链接发去哪）</label>
+        <input type="text" name="note" maxlength="120" placeholder="B 站动态 / 微博 / QQ 群">
+      </div>
+      <div>
+        <label>落地页</label>
+        <select name="target">
+          {% for value, label in share_target_labels.items() %}
+          <option value="{{ value }}">{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div style="flex:0 0 auto;min-width:auto">
+        <button type="submit">生成链接</button>
+      </div>
+    </div>
+  </form>
+  <p class="hint" style="margin:12px 0 0">
+    选「最新版下载」时，链接会直接跳到当前最新版本的产物下载；
+    之后发布了新版本，旧链接会自动跟到新的最新版。
+  </p>
+</div>
+
+<div class="card">
+  <h2>分享效果</h2>
+  <p class="hint">
+    区间与统计页一致（当前 {{ stats.days }} 天），可在「数据统计」分页里切换。
+    「点击」是链接被打开的次数；「访问 / 下载」是带着该短码发生的后续行为。
+  </p>
+
+  {% if share_links %}
+  <table class="tight">
+    <thead>
+      <tr>
+        <th>备注</th>
+        <th>链接</th>
+        <th>落地页</th>
+        <th>点击</th>
+        <th>访问</th>
+        <th>下载</th>
+        <th>保留期内访问 / 下载</th>
+        <th>状态</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for link in share_links %}
+      <tr>
+        <td>{{ link.note or '（未备注）' }}</td>
+        <td style="min-width:230px">
+          <input type="text" readonly value="{{ link.url }}" onclick="this.select()"
+                 title="点击全选，可直接复制" style="font-size:11px;padding:5px 8px">
+        </td>
+        <td class="muted">{{ link.target_label }}</td>
+        <td class="mono">{{ link.clicks }}</td>
+        <td class="mono">{{ link.views }}</td>
+        <td class="mono">{{ link.downloads }}</td>
+        <td class="muted mono">{{ link.total_views }} / {{ link.total_downloads }}</td>
+        <td>
+          {% if link.enabled %}<span class="tag on">启用</span>
+          {% else %}<span class="tag off">已停用</span>{% endif %}
+        </td>
+        <td style="text-align:right;white-space:nowrap">
+          <form method="post" action="/admin/apps/{{ app.id }}/share/{{ link.id }}/toggle"
+                style="display:inline">
+            <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+            <button class="ghost small" type="submit">{% if link.enabled %}停用{% else %}启用{% endif %}</button>
+          </form>
+          <form method="post" action="/admin/apps/{{ app.id }}/share/{{ link.id }}/delete"
+                style="display:inline"
+                onsubmit='return confirm({{ ("确认删除分享链接「" ~ (link.note or link.code) ~ "」？已记录的归因数据会保留。") | tojson }})'>
+            <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+            <button class="danger small" type="submit">删除</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">还没有分享链接。上面填个备注就能生成。</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>也可以直接用 ?ref= 参数</h2>
+  <p class="hint">
+    不想生成短码时，可以直接在地址后面加 <span class="mono">?ref=标记</span>，
+    例如 <span class="mono">{{ base_url }}/{{ app.slug }}?ref=weibo</span>。
+    访问介绍页时会把 <span class="mono">ref</span> 写进 Cookie，后续的下载与更新检查
+    也会带上它。
+  </p>
+  <p class="hint">
+    <strong>取值要求</strong>：只能用小写字母、数字、点、下划线和连字符，长度 1–64
+    （大写会自动转成小写）。不满足的值会被<strong>直接丢弃</strong> —— 既不写 Cookie
+    也不记到事件上，例如中文、空格、<span class="mono">#</span>，或超过 64 字符的串。
+  </p>
+  <p class="hint">
+    注意：这类来源<strong>不会出现在上表，也不计入「分享链接带来的访问」</strong>
+    —— 那个数字只统计后台生成过的短链。想让某个渠道可统计，用上面的表单生成一个短链。
+    <span class="mono">?ref=</span> 的值只保留在事件明细里，界面不做聚合。
+  </p>
+</div>

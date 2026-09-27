@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="zh-CN" data-mode="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>应用列表</title>
+<script>
+/* 主题在样式解析前就定好，避免首帧闪白/闪黑。
+   默认跟随系统；用户手动选过 light/dark 之后就不再被系统切换覆盖。
+   深色变量只在 :root[data-theme="dark"] 里写一份，靠这个脚本把 data-theme
+   同步成系统偏好，从而不必在 CSS 里把整套配色再抄一遍。 */
+(function () {
+  var KEY = 'apppublisher-theme';
+  var root = document.documentElement;
+
+  function systemTheme() {
+    return (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)
+      ? 'dark' : 'light';
+  }
+  function storedMode() {
+    try { return localStorage.getItem(KEY) || 'auto'; } catch (e) { return 'auto'; }
+  }
+  function apply(mode) {
+    root.setAttribute('data-theme', mode === 'auto' ? systemTheme() : mode);
+    root.setAttribute('data-mode', mode);
+  }
+
+  apply(storedMode());
+
+  if (window.matchMedia) {
+    var mq = window.matchMedia('(prefers-color-scheme: dark)');
+    var onSystemChange = function () { if (storedMode() === 'auto') apply('auto'); };
+    if (mq.addEventListener) { mq.addEventListener('change', onSystemChange); }
+    else if (mq.addListener) { mq.addListener(onSystemChange); }
+  }
+
+  window.appPublisherCycleTheme = function () {
+    var order = ['auto', 'light', 'dark'];
+    var next = order[(order.indexOf(storedMode()) + 1) % order.length];
+    try { localStorage.setItem(KEY, next); } catch (e) { /* 隐私模式下写不了，忽略 */ }
+    apply(next);
+  };
+})();
+</script>
+<style>
+  /* 这套配色是**故意**和 base.html 分开的，不要为了「统一」把它们合并：
+     这是面向访客的独立页面，要跟随系统明暗；后台是一套固定的深色工具界面。
+     两边的变量名（--surface vs --panel）与取值都不同，改一边不影响另一边。 */
+  :root {
+    color-scheme: light;
+    --bg: #f6f7f9;
+    --surface: #ffffff;
+    --surface-2: #f0f2f5;
+    --border: #e3e6ec;
+    --text: #14171f;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --accent-fg: #ffffff;
+    --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 8px 24px rgba(16, 24, 40, .06);
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0b0e14;
+    --surface: #141822;
+    --surface-2: #1b2130;
+    --border: #262d3d;
+    --text: #e7eaf1;
+    --muted: #98a1b3;
+    --accent: #3b82f6;
+    --accent-fg: #ffffff;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 12px 32px rgba(0, 0, 0, .35);
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    line-height: 1.6;
+    transition: background-color .18s ease, color .18s ease;
+  }
+  a { color: inherit; text-decoration: none; }
+
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 40px 20px 72px; }
+
+  .hero { display: flex; align-items: flex-end; gap: 16px; margin-bottom: 28px; }
+  .hero h1 { margin: 0; font-size: 28px; letter-spacing: -.02em; }
+  .hero .sub { margin: 4px 0 0; color: var(--muted); font-size: 14px; }
+  .hero .spacer { flex: 1; }
+
+  .theme-toggle {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 8px 14px; font: inherit; font-size: 13px; cursor: pointer;
+    background: var(--surface); color: var(--text);
+    border: 1px solid var(--border); border-radius: 999px;
+    transition: border-color .15s ease, background-color .15s ease;
+  }
+  .theme-toggle:hover { border-color: var(--accent); }
+  .theme-toggle .tt-icon::before { content: '\25d0'; }
+  [data-mode="light"] .theme-toggle .tt-icon::before { content: '\2600'; }
+  [data-mode="dark"] .theme-toggle .tt-icon::before { content: '\263e'; }
+  .theme-toggle .tt-label::after { content: '跟随系统'; }
+  [data-mode="light"] .theme-toggle .tt-label::after { content: '浅色'; }
+  [data-mode="dark"] .theme-toggle .tt-label::after { content: '深色'; }
+
+  .grid {
+    list-style: none; margin: 0; padding: 0;
+    display: grid; gap: 22px;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  }
+
+  .card {
+    display: flex; flex-direction: column; overflow: hidden;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 16px; box-shadow: var(--shadow);
+    transition: transform .18s ease, border-color .18s ease;
+  }
+  .card:hover { transform: translateY(-2px); border-color: var(--accent); }
+
+  .card-media {
+    position: relative; display: block; aspect-ratio: 16 / 9; overflow: hidden;
+    background: linear-gradient(135deg,
+      hsl(calc(var(--accent-h, 220) * 1deg), 68%, 56%),
+      hsl(calc((var(--accent-h, 220) + 42) * 1deg), 66%, 44%));
+  }
+  .card-media img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .card-media .placeholder {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 52px; font-weight: 600; color: rgba(255, 255, 255, .92);
+    text-shadow: 0 2px 12px rgba(0, 0, 0, .25);
+  }
+
+  .card-body { display: flex; flex-direction: column; flex: 1; padding: 18px 20px 20px; }
+  .card-body h2 { margin: 0; font-size: 17px; letter-spacing: -.01em; }
+  .card-body h2 a:hover { color: var(--accent); }
+  .tagline {
+    margin: 8px 0 0; color: var(--muted); font-size: 13.5px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .meta { display: flex; align-items: center; gap: 10px; margin-top: 14px; font-size: 12.5px; flex-wrap: wrap; }
+  .chip {
+    display: inline-block; padding: 3px 10px; border-radius: 999px;
+    background: var(--surface-2); border: 1px solid var(--border);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+  }
+  .muted { color: var(--muted); }
+
+  .actions { display: flex; gap: 10px; margin-top: auto; padding-top: 16px; }
+  .btn {
+    flex: 1; text-align: center; padding: 9px 14px; border-radius: 10px;
+    font-size: 13.5px; border: 1px solid var(--border); color: var(--text);
+    transition: border-color .15s ease, color .15s ease;
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+  .btn.primary:hover { filter: brightness(1.1); color: var(--accent-fg); }
+
+  .empty {
+    padding: 72px 24px; text-align: center; color: var(--muted);
+    background: var(--surface); border: 1px dashed var(--border); border-radius: 16px;
+  }
+
+  footer { margin-top: 48px; text-align: center; color: var(--muted); font-size: 12.5px; }
+
+  @media (max-width: 560px) {
+    .wrap { padding: 24px 14px 56px; }
+    .hero { flex-wrap: wrap; }
+    .hero h1 { font-size: 23px; }
+    .grid { grid-template-columns: 1fr; gap: 16px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="hero">
+    <div>
+      <h1>应用</h1>
+      <p class="sub">共 {{ total }} 个已上线应用</p>
+    </div>
+    <div class="spacer"></div>
+    <button class="theme-toggle" type="button" title="切换主题（跟随系统 / 浅色 / 深色）"
+            onclick="window.appPublisherCycleTheme()">
+      <span class="tt-icon" aria-hidden="true"></span>
+      <span class="tt-label"></span>
+    </button>
+  </header>
+
+  {% if cards %}
+  <ul class="grid">
+    {% for card in cards %}
+    <li class="card">
+      <a class="card-media" href="/{{ card.slug }}" style="--accent-h: {{ card.accent }}"
+         aria-label="查看 {{ card.name }}">
+        {% if card.banner_url %}
+        <img src="{{ card.banner_url }}" alt="{{ card.name }} 封面图" loading="lazy">
+        {% else %}
+        <span class="placeholder" aria-hidden="true">{{ card.initial }}</span>
+        {% endif %}
+      </a>
+      <div class="card-body">
+        <h2><a href="/{{ card.slug }}">{{ card.name }}</a></h2>
+        {% if card.tagline %}<p class="tagline">{{ card.tagline }}</p>{% endif %}
+        <div class="meta">
+          {% if card.latest_version %}
+          <span class="chip">{{ card.latest_version }}</span>
+          {% if card.size %}<span class="muted">{{ card.size | human_size }}</span>{% endif %}
+          <span class="muted">{{ card.released_at | format_time }}</span>
+          {% else %}
+          <span class="muted">暂未发布版本</span>
+          {% endif %}
+        </div>
+        <div class="actions">
+          <a class="btn" href="/{{ card.slug }}">查看介绍</a>
+          {% if card.latest_code %}
+          <a class="btn primary" href="/{{ card.slug }}/build/{{ card.latest_code }}">下载最新版</a>
+          {% endif %}
+        </div>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <div class="empty">还没有已上线的应用。</div>
+  {% endif %}
+
+  <footer>Powered by AppPublisher</footer>
+</div>
+</body>
+</html>

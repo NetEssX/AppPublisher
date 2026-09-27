@@ -1,0 +1,161 @@
+{# 统计面板。上下文：stats（见 admin.app_detail）。 #}
+<div class="card">
+  <div class="card-head">
+    <div>
+      <h2>数据统计</h2>
+      <p class="hint" style="margin-bottom:0">
+        明细保留 {{ stats.retention_days }} 天，超期自动清理。
+        <strong>下载与更新检查从不做机器人过滤</strong> —— 那两个接口只可能由客户端发起，
+        误判会把真实流量吃掉。只有介绍页浏览会排除爬虫。
+      </p>
+    </div>
+    <div style="display:flex;gap:6px;white-space:nowrap">
+      {% for choice in stats.choices %}
+      <a class="btnlink {% if choice == stats.days %}primary{% endif %}"
+         href="?days={{ choice }}{% if stats.include_bots %}&amp;bots=1{% endif %}#stats">{{ choice }} 天</a>
+      {% endfor %}
+    </div>
+  </div>
+
+  {# 已经在「包含机器人」状态时必须照样渲染这块：否则一旦该区间没有机器人访问
+     （比如那条记录已过期，或直接打开了带 bots=1 的地址），唯一的关闭入口就消失了。 #}
+  {% if stats.summary.bot_views or stats.include_bots %}
+  <p class="hint" style="margin:14px 0 0">
+    {% if stats.include_bots %}
+    当前<strong>已包含</strong>机器人访问。
+    <a href="?days={{ stats.days }}#stats">只看真实访客</a>
+    {% else %}
+    另有 <strong>{{ stats.summary.bot_views }}</strong> 次机器人访问未计入介绍页 PV。
+    <a href="?days={{ stats.days }}&amp;bots=1#stats">包含机器人查看</a>
+    {% endif %}
+  </p>
+  {% endif %}
+
+  <div class="stat-grid" style="margin-top:18px">
+    <div class="stat">
+      <span class="stat-num">{{ stats.summary.kinds.view.pv }}</span>
+      <span class="stat-label">介绍页访问 (PV)</span>
+    </div>
+    <div class="stat">
+      <span class="stat-num">{{ stats.summary.kinds.view.uv }}</span>
+      <span class="stat-label">独立访客 (UV)</span>
+    </div>
+    <div class="stat">
+      <span class="stat-num">{{ stats.summary.kinds.download.pv }}</span>
+      <span class="stat-label">下载次数</span>
+    </div>
+    <div class="stat">
+      <span class="stat-num">{{ stats.summary.kinds.update_check.pv }}</span>
+      <span class="stat-label">更新检查</span>
+    </div>
+    <div class="stat">
+      <span class="stat-num">{{ stats.summary.share_views }}</span>
+      <span class="stat-label">分享链接带来的访问</span>
+    </div>
+    <div class="stat" title="统计明细只保留 {{ stats.retention_days }} 天，超期会被清理，所以这个数字是保留期内的累计值，可能随时间下降">
+      <span class="stat-num">{{ stats.summary.total_download }}</span>
+      <span class="stat-label">累计下载（近 {{ stats.retention_days }} 天）</span>
+    </div>
+  </div>
+
+  {% if stats.summary.total_pv == 0 and stats.summary.bot_views == 0 %}
+  <p class="muted" style="margin:16px 0 0">
+    这段时间还没有记录到访问。数据从本次升级后开始在每次访问时累积。
+  </p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>每日趋势</h2>
+  <p class="hint">柱高 = 当天全部事件数（介绍页访问 + 下载 + 更新检查 + 分享点击）。鼠标悬停看明细。</p>
+
+  <div class="chart">
+    {% for item in stats.series %}
+    <div class="bar"
+         title="{{ item.day }}　访问 {{ item.view }}　下载 {{ item.download }}　更新检查 {{ item.update_check }}　分享点击 {{ item.share_click }}">
+      <span style="height: {{ item.pct }}%"></span>
+    </div>
+    {% endfor %}
+  </div>
+  {% set step = (stats.days // 8) + 1 %}
+  <div class="chart-axis">
+    {% for item in stats.series %}
+    <span>{% if loop.index0 % step == 0 %}{{ item.label }}{% endif %}</span>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="grid2" style="margin-bottom:20px">
+  <div class="card" style="margin-bottom:0">
+    <h2>访问来源</h2>
+    <p class="hint">按来源域名聚合；站内跳转不计入来源。</p>
+    {% if stats.referrers.rows or stats.referrers.direct %}
+    <table class="tight">
+      <thead><tr><th>来源</th><th>访问</th><th>独立</th></tr></thead>
+      <tbody>
+        {% if stats.referrers.direct %}
+        <tr>
+          <td class="muted">直接访问 / 未带 Referer</td>
+          <td>{{ stats.referrers.direct }}</td>
+          <td class="muted">—</td>
+        </tr>
+        {% endif %}
+        {% for row in stats.referrers.rows %}
+        <tr>
+          <td class="mono">{{ row.host }}</td>
+          <td>{{ row.total }}</td>
+          <td class="muted">{{ row.uniq }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">暂无来源数据。</p>
+    {% endif %}
+  </div>
+
+  <div class="card" style="margin-bottom:0">
+    <h2>客户端类型</h2>
+    <p class="hint">按 User-Agent 粗分类，用于判断访客主要来自哪类设备。</p>
+    {% if stats.ua_rows %}
+    <table class="tight">
+      <thead><tr><th>类型</th><th>访问</th></tr></thead>
+      <tbody>
+        {% for row in stats.ua_rows %}
+        <tr><td class="mono">{{ row.cls }}</td><td>{{ row.total }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">暂无数据。</p>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <h2>最近的下载</h2>
+  <p class="hint">最近 20 次产物下载。机器人流量也一并列出，便于判断异常来源。</p>
+  {% if stats.recent %}
+  <table class="tight">
+    <thead><tr><th>时间</th><th>版本</th><th>来源</th><th>客户端</th></tr></thead>
+    <tbody>
+      {% for row in stats.recent %}
+      <tr>
+        <td class="muted">{{ row.created_at | format_time }}</td>
+        <td>
+          {{ row.version_name or '（版本已删除）' }}
+          {% if row.version_code %}<span class="mono muted">{{ row.version_code }}</span>{% endif %}
+        </td>
+        <td class="mono">{{ row.referrer_host or '—' }}</td>
+        <td>
+          <span class="mono">{{ row.ua_class }}</span>
+          {% if row.is_bot %}<span class="tag off">机器人</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">还没有下载记录。</p>
+  {% endif %}
+</div>

@@ -37,11 +37,66 @@ CREATE TABLE IF NOT EXISTS apps (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     slug        TEXT    NOT NULL UNIQUE COLLATE NOCASE,
     name        TEXT    NOT NULL,
+    tagline     TEXT    NOT NULL DEFAULT '',
     intro_html  TEXT    NOT NULL DEFAULT '',
+    banner_path TEXT,
     enabled     INTEGER NOT NULL DEFAULT 1,
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL
 );
+
+-- 访问统计明细。刻意不存原始 IP：visitor 是加盐哈希，见 analytics.visitor_id()。
+CREATE TABLE IF NOT EXISTS events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    app_id        INTEGER NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+    kind          TEXT    NOT NULL,
+    release_id    INTEGER,
+    day           TEXT    NOT NULL,
+    created_at    INTEGER NOT NULL,
+    visitor       TEXT    NOT NULL DEFAULT '',
+    referrer_host TEXT    NOT NULL DEFAULT '',
+    ua_class      TEXT    NOT NULL DEFAULT '',
+    is_bot        INTEGER NOT NULL DEFAULT 0,
+    share_code    TEXT    NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_app_created ON events (app_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_app_kind ON events (app_id, kind, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_created ON events (created_at);
+
+-- 键值小表：目前用于记录上次清理统计明细的日期。
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+-- 上传的图片资源，用于在后台「媒体资源」里列出与删除。
+-- 封面（banner）不进这张表：它是「每个应用至多一张」的当前指针，记在 apps.banner_path。
+CREATE TABLE IF NOT EXISTS assets (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    app_id        INTEGER NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+    path          TEXT    NOT NULL,
+    original_name TEXT    NOT NULL DEFAULT '',
+    size          INTEGER NOT NULL DEFAULT 0,
+    created_at    INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_assets_app ON assets (app_id, id DESC);
+
+-- 分享链接。访问 /{slug}/s/{code} 会记一次点击并把 code 写进 Cookie，
+-- 之后该访客的介绍页访问 / 下载都会带着这个 code，用于归因。
+CREATE TABLE IF NOT EXISTS share_links (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    app_id     INTEGER NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+    code       TEXT    NOT NULL UNIQUE,
+    note       TEXT    NOT NULL DEFAULT '',
+    target     TEXT    NOT NULL DEFAULT 'intro',
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_share_links_app ON share_links (app_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_events_share ON events (app_id, share_code);
 
 CREATE TABLE IF NOT EXISTS releases (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -142,11 +197,56 @@ def _check_legacy_schema(conn: sqlite3.Connection) -> None:
         )
 
 
+# 新增列一律登记在这里。CREATE TABLE IF NOT EXISTS 不会给「已经存在的表」补列，
+# 所以已部署的库必须靠 ALTER 迁移；只加不存在的列，因此可重复执行。
+_ADDITIVE_COLUMNS = {
+    "apps": (
+        ("tagline", "TEXT NOT NULL DEFAULT ''"),
+        ("banner_path", "TEXT"),
+    ),
+    "releases": (
+        ("content_type", "TEXT NOT NULL DEFAULT 'application/octet-stream'"),
+    ),
+    "events": (
+        ("share_code", "TEXT NOT NULL DEFAULT ''"),
+    ),
+}
+
+
+def _apply_additive_columns(conn: sqlite3.Connection) -> None:
+    for table, columns in _ADDITIVE_COLUMNS.items():
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if not existing:
+            # 表还不存在：交给后面的 SCHEMA 用它那份完整列定义建出来，不要在这里 ALTER。
+            continue
+        for name, ddl in columns:
+            if name in existing:
+                continue
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+            except sqlite3.OperationalError:
+                # 冷启动并发是明确支持的场景（见上面的 WAL 重试与 bootstrap_admin 的
+                # IntegrityError 处理）。两个副本可能都看到列缺失、都去 ALTER，
+                # 输的那个会拿到 "duplicate column name" —— 只要列现在已经在了，
+                # 就说明迁移实际已经完成，不该因此让这个进程起不来。
+                current = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+                if name not in current:
+                    raise
+                logger.info("数据库迁移：%s.%s 已由其它进程补上", table, name)
+                continue
+            logger.info("数据库迁移：%s 新增列 %s", table, name)
+
+
 def init_db() -> None:
     conn = get_conn()
-    # 先检查再建表：旧库列名与新版对不上，宁可在动任何东西之前就明确报错，
-    # 也不要先跑一遍 DDL 再失败。
+    # 顺序不能变，三步各有理由：
+    #   1) 旧库列名对不上时先明确报错，而不是跑一半 DDL 再失败；
+    #   2) **补列必须在建索引之前**：SCHEMA 里有 CREATE INDEX ... ON events(share_code)
+    #      这类语句，老库的 events 表还没有那一列，先建索引会直接
+    #      "no such column" 把启动搞挂；
+    #   3) 最后跑 SCHEMA：补建缺失的表与索引（已存在的表会跳过）。
     _check_legacy_schema(conn)
+    _apply_additive_columns(conn)
     conn.executescript(SCHEMA)
 
 

@@ -10,6 +10,7 @@
         <span class="mono">/{{ app.slug }}</span>
         {% if app.enabled %}<span class="tag on">已上线</span>
         {% else %}<span class="tag off">已下线</span>{% endif %}
+        {% if app.tagline %}<span class="muted"> · {{ app.tagline }}</span>{% endif %}
       </p>
     </div>
     <div style="display:flex;gap:8px;white-space:nowrap">
@@ -19,280 +20,436 @@
   </div>
 </div>
 
-{# ---------------------------------------------------------------- 基本信息 #}
-<form class="card" method="post" action="/admin/apps/{{ app.id }}" enctype="multipart/form-data">
-  <h2>基本信息与介绍页</h2>
-  <p class="hint">介绍页 HTML 会原样输出。注意：里面粘贴的任何脚本都会真实执行，别用来路不明的代码。</p>
-  <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+{# 这是 hash 导航，不是 ARIA tab 组件：普通链接本身就是正确且可访问的语义。
+   不加 role="tab"——半套 ARIA（只有 role、没有 tabpanel/aria-controls/键盘处理）
+   比不加更糟，而且会让 <nav> 丢掉导航地标角色。 #}
+<nav class="tabs">
+  <a href="#intro"    data-tab="intro">介绍页</a>
+  <a href="#media"    data-tab="media">媒体资源</a>
+  <a href="#releases" data-tab="releases">发行版</a>
+  <a href="#notices"  data-tab="notices">公告</a>
+  <a href="#stats"    data-tab="stats">数据统计</a>
+  <a href="#share"    data-tab="share">分享链接</a>
+  <a href="#danger"   data-tab="danger">删除应用</a>
+</nav>
 
-  <div class="grid2">
-    <div>
-      <label>应用名称</label>
-      <input type="text" name="name" value="{{ app.name }}" required>
-    </div>
-    <div>
-      <label>短链（修改会让旧地址立即失效）</label>
-      <input type="text" name="slug" value="{{ app.slug }}" required>
-    </div>
-  </div>
-
-  <label>介绍页 HTML</label>
-  <textarea name="intro_html" rows="18">{{ app.intro_html }}</textarea>
-
-  <label>或上传 HTML 文件覆盖（选择文件后，上面的内容会被替换）</label>
-  <input type="file" name="intro_file" accept=".html,.htm,.txt">
-
-  <label style="display:flex;align-items:center;gap:8px;margin-top:18px">
-    <input type="checkbox" name="enabled" value="1" {% if app.enabled %}checked{% endif %}> 上线（取消勾选则对外 404）
-  </label>
-
-  <div style="margin-top:22px">
-    <button type="submit">保存</button>
-  </div>
-</form>
-
-{# ---------------------------------------------------------------- 图片 #}
-<div class="card">
-  <h2>图片资源</h2>
-  <p class="hint">
-    上传后把返回的地址填进介绍页 HTML，例如
-    <span class="mono">&lt;img src="{{ base_url }}/media/images/xxxx.png"&gt;</span>
-  </p>
-  <form method="post" action="/admin/apps/{{ app.id }}/images" enctype="multipart/form-data" class="row">
+{# ================================================================ 介绍页 #}
+<section id="intro" class="panel" data-panel="intro">
+  <form class="card" method="post" action="/admin/apps/{{ app.id }}" enctype="multipart/form-data">
+    <h2>基本信息与介绍页</h2>
+    <p class="hint">介绍页 HTML 会原样输出。注意：里面粘贴的任何脚本都会真实执行，别用来路不明的代码。</p>
     <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
-    <input type="file" name="image" accept="image/*" required>
-    <div style="flex:0 0 auto;min-width:auto"><button type="submit">上传图片</button></div>
-  </form>
-</div>
 
-{# ---------------------------------------------------------------- API #}
-<div class="card">
-  <h2>接口速查</h2>
-  <p class="hint">下面是该应用当前对外提供的接口。更新接口的返回体会随「最新版本」自动变化。</p>
-  <table style="margin-bottom:16px">
-    <tr><td class="mono">GET {{ base_url }}/{{ app.slug }}/releases/latest</td><td class="muted">最新版本 JSON</td></tr>
-    <tr><td class="mono">GET {{ base_url }}/{{ app.slug }}/releases</td><td class="muted">所有版本列表</td></tr>
-    <tr><td class="mono">GET {{ base_url }}/{{ app.slug }}/build/{versionCode}</td><td class="muted">下载构建产物</td></tr>
-    <tr><td class="mono">GET {{ base_url }}/{{ app.slug }}/notices/latest</td><td class="muted">最新公告 JSON</td></tr>
-    <tr><td class="mono">GET {{ base_url }}/{{ app.slug }}/notices</td><td class="muted">公告列表</td></tr>
-  </table>
-
-  <label>releases/latest 当前返回</label>
-  {% if preview_json %}
-  <pre>{{ preview_json }}</pre>
-  {% else %}
-  <p class="muted">还没有发行版。上传一个构建产物后这里会显示真实返回。</p>
-  {% endif %}
-
-  <label style="margin-top:16px">notices/latest 当前返回</label>
-  {% if notice_json %}
-  <pre>{{ notice_json }}</pre>
-  {% else %}
-  <p class="muted">还没有公告。</p>
-  {% endif %}
-</div>
-
-{# ---------------------------------------------------------------- 发行版 #}
-<div class="card">
-  <h2>发行版</h2>
-  <p class="hint">上传构建产物后即可被客户端检查到。下载地址由「版本号」定位，改版本名不会让它失效。</p>
-
-  <form method="post" action="/admin/apps/{{ app.id }}/releases" enctype="multipart/form-data" style="margin-bottom:22px">
-    <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
-    <div class="row">
+    <div class="grid2">
       <div>
-        <label>版本名</label>
-        <input type="text" name="version_name" required placeholder="v1.2.0">
+        <label>应用名称</label>
+        <input type="text" name="name" value="{{ app.name }}" required>
       </div>
       <div>
-        <label>版本号 versionCode</label>
-        <input type="number" name="version_code" required min="1" placeholder="26092711">
-      </div>
-      <div>
-        <label>发布时间（留空为当前时间）</label>
-        <input type="datetime-local" name="released_at">
+        <label>短链（修改会让旧地址立即失效）</label>
+        <input type="text" name="slug" value="{{ app.slug }}" required>
       </div>
     </div>
 
-    <label>更新说明</label>
-    <textarea name="description" rows="4" placeholder="本次更新内容…"></textarea>
+    <label>一句话简介（显示在根页卡片上，留空则不显示）</label>
+    <input type="text" name="tagline" value="{{ app.tagline }}" maxlength="200"
+           placeholder="一句话说明这个应用做什么">
 
-    <label>构建产物文件</label>
-    <input type="file" name="build" accept="{{ accept_extensions }}" required>
+    <label>介绍页 HTML</label>
+    <textarea name="intro_html" rows="18">{{ app.intro_html }}</textarea>
 
-    <label style="display:flex;align-items:center;gap:8px;margin-top:14px">
-      <input type="checkbox" name="make_latest" value="1" checked> 设为最新版本
-    </label>
-    <label style="display:flex;align-items:center;gap:8px;margin-top:4px">
-      <input type="checkbox" name="force_update" value="1"> 强制更新
+    <label>或上传 HTML 文件覆盖（选择文件后，上面的内容会被替换）</label>
+    <input type="file" name="intro_file" accept=".html,.htm,.txt">
+
+    <label style="display:flex;align-items:center;gap:8px;margin-top:18px">
+      <input type="checkbox" name="enabled" value="1" {% if app.enabled %}checked{% endif %}>
+      上线（取消勾选则对外 404）
     </label>
 
-    <div style="margin-top:20px"><button type="submit">上传并发布</button></div>
-  </form>
-
-  {% if releases %}
-  <table>
-    <thead>
-      <tr>
-        <th>版本</th>
-        <th>版本号</th>
-        <th>大小</th>
-        <th>发布时间</th>
-        <th>标记</th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for release in releases %}
-      <tr>
-        <td>
-          {{ release.version_name }}
-          {% if release.description %}<div class="muted" style="font-size:12px">{{ release.description }}</div>{% endif %}
-          <div class="mono muted">{{ release.build_name }}</div>
-          <div class="mono muted">sha256 {{ release.build_sha256[:16] }}…</div>
-        </td>
-        <td class="mono">{{ release.version_code }}</td>
-        <td>{{ release.build_size | human_size }}</td>
-        <td class="muted">{{ release.released_at | format_time }}</td>
-        <td>
-          {% if release.is_latest %}<span class="tag info">latest</span>{% endif %}
-          {% if release.force_update %}<span class="tag off">强制</span>{% endif %}
-        </td>
-        <td style="text-align:right;white-space:nowrap">
-          <a class="btnlink" href="/{{ app.slug }}/build/{{ release.version_code }}">下载</a>
-          {% if not release.is_latest %}
-          <form method="post" action="/admin/apps/{{ app.id }}/releases/{{ release.id }}/latest" style="display:inline">
-            <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
-            <button class="ghost small" type="submit">设为最新</button>
-          </form>
-          {% endif %}
-          <form method="post" action="/admin/apps/{{ app.id }}/releases/{{ release.id }}/delete"
-                style="display:inline"
-                onsubmit='return confirm({{ ("确认删除 " ~ release.version_name ~ "？构建产物文件也会被删除。") | tojson }})'>
-            <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
-            <button class="danger small" type="submit">删除</button>
-          </form>
-        </td>
-      </tr>
-      <tr>
-        <td colspan="6" style="padding-top:0">
-          <details>
-            <summary>编辑此版本</summary>
-            <form method="post" action="/admin/apps/{{ app.id }}/releases/{{ release.id }}">
-              <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
-              <div class="row">
-                <div>
-                  <label>版本名</label>
-                  <input type="text" name="version_name" value="{{ release.version_name }}" required>
-                </div>
-                <div>
-                  <label>发布时间</label>
-                  <input type="datetime-local" name="released_at" value="{{ release.released_at | local_input }}">
-                </div>
-              </div>
-              <label>更新说明</label>
-              <textarea name="description" rows="3">{{ release.description }}</textarea>
-              <label style="display:flex;align-items:center;gap:8px;margin-top:12px">
-                <input type="checkbox" name="force_update" value="1" {% if release.force_update %}checked{% endif %}> 强制更新
-              </label>
-              <div style="margin-top:14px"><button class="small" type="submit">保存修改</button></div>
-            </form>
-          </details>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p class="muted">还没有发行版。</p>
-  {% endif %}
-</div>
-
-{# ---------------------------------------------------------------- 公告 #}
-<div class="card">
-  <h2>公告</h2>
-  <p class="hint">客户端请求 <span class="mono">/{{ app.slug }}/notices/latest</span> 会拿到发布时间最晚的一条。</p>
-
-  <form method="post" action="/admin/apps/{{ app.id }}/notices" style="margin-bottom:22px">
-    <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
-    <div class="row">
-      <div style="flex:2">
-        <label>标题</label>
-        <input type="text" name="title" required placeholder="服务器维护通知">
-      </div>
-      <div>
-        <label>发布时间（留空为当前时间）</label>
-        <input type="datetime-local" name="published_at">
-      </div>
+    <div style="margin-top:22px">
+      <button type="submit">保存</button>
     </div>
-    <label>内容</label>
-    <textarea name="content" rows="4" placeholder="公告正文…"></textarea>
-    <div style="margin-top:16px"><button type="submit">发布公告</button></div>
   </form>
+</section>
 
-  {% if notices %}
-  <table>
-    <thead>
-      <tr><th>标题</th><th>发布时间</th><th>ID</th><th></th></tr>
-    </thead>
-    <tbody>
-      {% for notice in notices %}
-      <tr>
-        <td>
-          {{ notice.title }}
-          {% if notice.content %}<div class="muted" style="font-size:12px;white-space:pre-wrap">{{ notice.content }}</div>{% endif %}
-        </td>
-        <td class="muted">{{ notice.published_at | format_time }}</td>
-        <td class="mono">{{ notice.id }}</td>
-        <td style="text-align:right;white-space:nowrap">
-          <form method="post" action="/admin/apps/{{ app.id }}/notices/{{ notice.id }}/delete"
-                style="display:inline"
-                onsubmit='return confirm({{ ("确认删除公告「" ~ notice.title ~ "」？") | tojson }})'>
+{# ================================================================ 媒体资源 #}
+<section id="media" class="panel" data-panel="media" hidden>
+  <div class="card">
+    <h2>封面图（Banner）</h2>
+    <p class="hint">
+      显示在根页 <span class="mono">/</span> 的应用卡片顶部。建议 16:9 横向图（例如 1280×720），
+      未设置时用按短链生成的渐变色块占位。
+    </p>
+
+    {% if banner_url %}
+    <div style="margin-bottom:16px">
+      <img src="{{ banner_url }}" alt="当前封面"
+           style="width:100%;max-width:420px;aspect-ratio:16/9;object-fit:cover;
+                  border:1px solid var(--border);border-radius:10px;display:block">
+    </div>
+    <label>封面地址（点击全选即可复制）</label>
+    <input type="text" readonly value="{{ banner_link }}" onclick="this.select()"
+           style="margin-bottom:16px">
+    {% else %}
+    <p class="muted" style="margin-bottom:16px">当前没有封面图。</p>
+    {% endif %}
+
+    <form method="post" action="/admin/apps/{{ app.id }}/banner" enctype="multipart/form-data" class="row">
+      <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+      <input type="file" name="banner" accept="image/*" required>
+      <div style="flex:0 0 auto;min-width:auto"><button type="submit">上传封面</button></div>
+    </form>
+
+    {% if banner_url %}
+    <form method="post" action="/admin/apps/{{ app.id }}/banner/delete" style="margin-top:12px"
+          onsubmit='return confirm({{ ("确认移除 " ~ app.name ~ " 的封面图？") | tojson }})'>
+      <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+      <button class="danger small" type="submit">移除封面</button>
+    </form>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>介绍页图片</h2>
+    <p class="hint">
+      把下面的地址填进介绍页 HTML，例如
+      <span class="mono">&lt;img src="{{ base_url }}/media/images/xxxx.png"&gt;</span>。
+      上传的图片对所有应用共用同一份地址空间。
+    </p>
+    <form method="post" action="/admin/apps/{{ app.id }}/images" enctype="multipart/form-data" class="row">
+      <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+      <input type="file" name="image" accept="image/*" required>
+      <div style="flex:0 0 auto;min-width:auto"><button type="submit">上传图片</button></div>
+    </form>
+    <p class="hint" style="margin:12px 0 0">
+      出于安全考虑不接受 <span class="mono">.svg</span>：它会被浏览器当文档内联渲染，其中的脚本能在本站源下执行。
+    </p>
+
+    {% if assets %}
+    <div style="margin-top:20px;display:grid;gap:14px;
+                grid-template-columns:repeat(auto-fill,minmax(210px,1fr))">
+      {% for asset in assets %}
+      <div style="border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--panel-2)">
+        <a href="{{ asset.url }}" target="_blank" rel="noopener">
+          <img src="/media/{{ asset.path }}" alt="{{ asset.name }}" loading="lazy"
+               style="width:100%;aspect-ratio:16/9;object-fit:cover;display:block;background:#000">
+        </a>
+        <div style="padding:10px 12px">
+          <div style="font-size:12.5px;word-break:break-all">{{ asset.name }}</div>
+          <div class="muted" style="font-size:11.5px;margin-top:2px">
+            {{ asset.size | human_size }} · {{ asset.created_at | format_time }}
+          </div>
+          <input type="text" readonly value="{{ asset.url }}" onclick="this.select()"
+                 title="点击全选，可直接复制"
+                 style="width:100%;margin-top:8px;font-size:11px;padding:5px 8px">
+          <form method="post" action="/admin/apps/{{ app.id }}/images/{{ asset.id }}/delete"
+                style="margin-top:8px"
+                onsubmit='return confirm({{ ("确认删除 " ~ asset.name ~ "？引用了它的介绍页会变成裂图。") | tojson }})'>
             <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
-            <button class="danger small" type="submit">删除</button>
+            <button class="danger small" type="submit" style="width:100%">删除</button>
           </form>
-        </td>
-      </tr>
-      <tr>
-        <td colspan="4" style="padding-top:0">
-          <details>
-            <summary>编辑此公告</summary>
-            <form method="post" action="/admin/apps/{{ app.id }}/notices/{{ notice.id }}">
-              <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
-              <div class="row">
-                <div style="flex:2">
-                  <label>标题</label>
-                  <input type="text" name="title" value="{{ notice.title }}" required>
-                </div>
-                <div>
-                  <label>发布时间</label>
-                  <input type="datetime-local" name="published_at" value="{{ notice.published_at | local_input }}">
-                </div>
-              </div>
-              <label>内容</label>
-              <textarea name="content" rows="3">{{ notice.content }}</textarea>
-              <div style="margin-top:14px"><button class="small" type="submit">保存修改</button></div>
-            </form>
-          </details>
-        </td>
-      </tr>
+        </div>
+      </div>
       {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p class="muted">还没有公告。</p>
-  {% endif %}
-</div>
+    </div>
+    {% else %}
+    <p class="muted" style="margin-top:16px">该应用还没有上传过图片。</p>
+    {% endif %}
+  </div>
 
-{# ---------------------------------------------------------------- 危险区 #}
-<div class="card" style="border-color:#5b2b2b">
-  <h2>删除应用</h2>
-  <p class="hint">会一并删除该应用的全部发行版、构建产物文件与公告，且无法撤销。</p>
-  <form method="post" action="/admin/apps/{{ app.id }}/delete"
-        onsubmit='return confirm({{ ("确认删除应用「" ~ app.name ~ "」及其全部发行版？此操作不可撤销。") | tojson }})'>
-    <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
-    <button class="danger" type="submit">删除「{{ app.name }}」</button>
-  </form>
-</div>
+  {% if unregistered %}
+  <div class="card">
+    <h2>未登记的图片</h2>
+    <p class="hint">
+      这些文件在 <span class="mono">data/uploads/images/</span> 里，但没有任何应用认领
+      —— 通常是本次升级之前上传的（当时还没有归属记录），或手工放进目录的。
+      它们仍然可以正常通过下面这些地址访问。
+    </p>
+    <div style="display:grid;gap:14px;grid-template-columns:repeat(auto-fill,minmax(210px,1fr))">
+      {% for item in unregistered %}
+      <div style="border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--panel-2)">
+        <a href="{{ item.url }}" target="_blank" rel="noopener">
+          <img src="/media/{{ item.path }}" alt="{{ item.name }}" loading="lazy"
+               style="width:100%;aspect-ratio:16/9;object-fit:cover;display:block;background:#000">
+        </a>
+        <div style="padding:10px 12px">
+          <div class="muted" style="font-size:11.5px">{{ item.size | human_size }}</div>
+          <input type="text" readonly value="{{ item.url }}" onclick="this.select()"
+                 title="点击全选，可直接复制"
+                 style="width:100%;margin-top:8px;font-size:11px;padding:5px 8px">
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+</section>
+
+{# ================================================================ 发行版 #}
+<section id="releases" class="panel" data-panel="releases" hidden>
+  <div class="card">
+    <h2>发行版</h2>
+    <p class="hint">上传产物后即可被客户端检查到。下载地址由「版本号」定位，改版本名不会让它失效。</p>
+
+    <form method="post" action="/admin/apps/{{ app.id }}/releases" enctype="multipart/form-data" style="margin-bottom:22px">
+      <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+      <div class="row">
+        <div>
+          <label>版本名</label>
+          <input type="text" name="version_name" required placeholder="v1.2.0">
+        </div>
+        <div>
+          <label>版本号 versionCode</label>
+          <input type="number" name="version_code" required min="1" placeholder="26092711">
+        </div>
+        <div>
+          <label>发布时间（留空为当前时间）</label>
+          <input type="datetime-local" name="released_at">
+        </div>
+      </div>
+
+      <label>更新说明</label>
+      <textarea name="description" rows="4" placeholder="本次更新内容…"></textarea>
+
+      <label>构建产物文件</label>
+      <input type="file" name="build" accept="{{ accept_extensions }}" required>
+
+      <label style="display:flex;align-items:center;gap:8px;margin-top:14px">
+        <input type="checkbox" name="make_latest" value="1" checked> 设为最新版本
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:4px">
+        <input type="checkbox" name="force_update" value="1"> 强制更新
+      </label>
+
+      <div style="margin-top:20px"><button type="submit">上传并发布</button></div>
+    </form>
+
+    {% if releases %}
+    <table>
+      <thead>
+        <tr>
+          <th>版本</th><th>版本号</th><th>大小</th><th>发布时间</th><th>标记</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for release in releases %}
+        <tr>
+          <td>
+            {{ release.version_name }}
+            {% if release.description %}<div class="muted" style="font-size:12px">{{ release.description }}</div>{% endif %}
+            <div class="mono muted">sha256 {{ release.build_sha256[:16] }}…</div>
+          </td>
+          <td class="mono">{{ release.version_code }}</td>
+          <td>{{ release.build_size | human_size }}</td>
+          <td class="muted">{{ release.released_at | format_time }}</td>
+          <td>
+            {% if release.is_latest %}<span class="tag info">latest</span>{% endif %}
+            {% if release.force_update %}<span class="tag off">强制</span>{% endif %}
+          </td>
+          <td style="text-align:right;white-space:nowrap">
+            <a class="btnlink" href="/{{ app.slug }}/build/{{ release.version_code }}">下载</a>
+            {% if not release.is_latest %}
+            <form method="post" action="/admin/apps/{{ app.id }}/releases/{{ release.id }}/latest" style="display:inline">
+              <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+              <button class="ghost small" type="submit">设为最新</button>
+            </form>
+            {% endif %}
+            <form method="post" action="/admin/apps/{{ app.id }}/releases/{{ release.id }}/delete"
+                  style="display:inline"
+                  onsubmit='return confirm({{ ("确认删除 " ~ release.version_name ~ "？构建产物文件也会被删除。") | tojson }})'>
+              <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+              <button class="danger small" type="submit">删除</button>
+            </form>
+          </td>
+        </tr>
+        <tr>
+          <td colspan="6" style="padding-top:0">
+            <details>
+              <summary>编辑此版本</summary>
+              <form method="post" action="/admin/apps/{{ app.id }}/releases/{{ release.id }}">
+                <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+                <div class="row">
+                  <div>
+                    <label>版本名</label>
+                    <input type="text" name="version_name" value="{{ release.version_name }}" required>
+                  </div>
+                  <div>
+                    <label>发布时间</label>
+                    <input type="datetime-local" name="released_at" value="{{ release.released_at | local_input }}">
+                  </div>
+                </div>
+                <label>更新说明</label>
+                <textarea name="description" rows="3">{{ release.description }}</textarea>
+                <label style="display:flex;align-items:center;gap:8px;margin-top:12px">
+                  <input type="checkbox" name="force_update" value="1" {% if release.force_update %}checked{% endif %}> 强制更新
+                </label>
+                <div style="margin-top:14px"><button class="small" type="submit">保存修改</button></div>
+              </form>
+            </details>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">还没有发行版。</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>接口速查</h2>
+    <p class="hint">该应用对外提供的接口。更新接口的返回体会随「最新版本」自动变化。</p>
+    <table style="margin-bottom:16px">
+      <tr><td class="mono">GET {{ base_url }}/{{ app.slug }}/releases/latest</td><td class="muted">最新版本 JSON</td></tr>
+      <tr><td class="mono">GET {{ base_url }}/{{ app.slug }}/releases</td><td class="muted">所有版本列表</td></tr>
+      <tr><td class="mono">GET {{ base_url }}/{{ app.slug }}/build/{versionCode}</td><td class="muted">下载构建产物</td></tr>
+      <tr><td class="mono">GET {{ base_url }}/{{ app.slug }}/notices/latest</td><td class="muted">最新公告 JSON</td></tr>
+      <tr><td class="mono">GET {{ base_url }}/{{ app.slug }}/notices</td><td class="muted">公告列表</td></tr>
+    </table>
+
+    <label>releases/latest 当前返回</label>
+    {% if preview_json %}
+    <pre>{{ preview_json }}</pre>
+    {% else %}
+    <p class="muted">还没有发行版。上传一个产物后这里会显示真实返回。</p>
+    {% endif %}
+
+    <label style="margin-top:16px">notices/latest 当前返回</label>
+    {% if notice_json %}
+    <pre>{{ notice_json }}</pre>
+    {% else %}
+    <p class="muted">还没有公告。</p>
+    {% endif %}
+  </div>
+</section>
+
+{# ================================================================ 公告 #}
+<section id="notices" class="panel" data-panel="notices" hidden>
+  <div class="card">
+    <h2>公告</h2>
+    <p class="hint">客户端请求 <span class="mono">/{{ app.slug }}/notices/latest</span> 会拿到发布时间最晚的一条。</p>
+
+    <form method="post" action="/admin/apps/{{ app.id }}/notices" style="margin-bottom:22px">
+      <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+      <div class="row">
+        <div style="flex:2">
+          <label>标题</label>
+          <input type="text" name="title" required placeholder="服务器维护通知">
+        </div>
+        <div>
+          <label>发布时间（留空为当前时间）</label>
+          <input type="datetime-local" name="published_at">
+        </div>
+      </div>
+      <label>内容</label>
+      <textarea name="content" rows="4" placeholder="公告正文…"></textarea>
+      <div style="margin-top:16px"><button type="submit">发布公告</button></div>
+    </form>
+
+    {% if notices %}
+    <table>
+      <thead><tr><th>标题</th><th>发布时间</th><th>ID</th><th></th></tr></thead>
+      <tbody>
+        {% for notice in notices %}
+        <tr>
+          <td>
+            {{ notice.title }}
+            {% if notice.content %}<div class="muted" style="font-size:12px;white-space:pre-wrap">{{ notice.content }}</div>{% endif %}
+          </td>
+          <td class="muted">{{ notice.published_at | format_time }}</td>
+          <td class="mono">{{ notice.id }}</td>
+          <td style="text-align:right;white-space:nowrap">
+            <form method="post" action="/admin/apps/{{ app.id }}/notices/{{ notice.id }}/delete"
+                  style="display:inline"
+                  onsubmit='return confirm({{ ("确认删除公告「" ~ notice.title ~ "」？") | tojson }})'>
+              <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+              <button class="danger small" type="submit">删除</button>
+            </form>
+          </td>
+        </tr>
+        <tr>
+          <td colspan="4" style="padding-top:0">
+            <details>
+              <summary>编辑此公告</summary>
+              <form method="post" action="/admin/apps/{{ app.id }}/notices/{{ notice.id }}">
+                <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+                <div class="row">
+                  <div style="flex:2">
+                    <label>标题</label>
+                    <input type="text" name="title" value="{{ notice.title }}" required>
+                  </div>
+                  <div>
+                    <label>发布时间</label>
+                    <input type="datetime-local" name="published_at" value="{{ notice.published_at | local_input }}">
+                  </div>
+                </div>
+                <label>内容</label>
+                <textarea name="content" rows="3">{{ notice.content }}</textarea>
+                <div style="margin-top:14px"><button class="small" type="submit">保存修改</button></div>
+              </form>
+            </details>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">还没有公告。</p>
+    {% endif %}
+  </div>
+</section>
+
+{# ================================================================ 数据统计 #}
+<section id="stats" class="panel" data-panel="stats" hidden>
+  {% include "_stats.html" %}
+</section>
+
+{# ================================================================ 分享链接 #}
+<section id="share" class="panel" data-panel="share" hidden>
+  {% include "_share.html" %}
+</section>
+
+{# ================================================================ 删除应用 #}
+<section id="danger" class="panel" data-panel="danger" hidden>
+  <div class="card" style="border-color:#5b2b2b">
+    <h2>删除应用</h2>
+    <p class="hint">会一并删除该应用的全部发行版、构建产物、封面图与公告，且无法撤销。</p>
+    <form method="post" action="/admin/apps/{{ app.id }}/delete"
+          onsubmit='return confirm({{ ("确认删除应用「" ~ app.name ~ "」及其全部发行版？此操作不可撤销。") | tojson }})'>
+      <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+      <button class="danger" type="submit">删除「{{ app.name }}」</button>
+    </form>
+  </div>
+</section>
+
+<script>
+/* 分页以 URL hash 为唯一状态：后台跳转可以直接带 #media 之类的锚点，
+   刷新与前进后退也都停在同一页。
+   禁用 JS 时由 base.html 的 <noscript> 强制展开全部 panel，内容不会不可达。 */
+(function () {
+  var TABS = ['intro', 'media', 'releases', 'notices', 'stats', 'share', 'danger'];
+
+  function currentTab() {
+    var name = (location.hash || '').replace('#', '');
+    return TABS.indexOf(name) >= 0 ? name : TABS[0];
+  }
+
+  function show(name) {
+    document.querySelectorAll('[data-panel]').forEach(function (panel) {
+      panel.hidden = panel.getAttribute('data-panel') !== name;
+    });
+    document.querySelectorAll('[data-tab]').forEach(function (tab) {
+      var active = tab.getAttribute('data-tab') === name;
+      tab.classList.toggle('active', active);
+      // 导航用 aria-current 而不是 aria-selected：这些是链接，不是 tab 组件。
+      if (active) { tab.setAttribute('aria-current', 'true'); }
+      else { tab.removeAttribute('aria-current'); }
+    });
+  }
+
+  window.addEventListener('hashchange', function () { show(currentTab()); });
+  show(currentTab());
+})();
+</script>
 
 {% endblock %}

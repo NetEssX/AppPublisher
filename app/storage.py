@@ -139,6 +139,32 @@ def download_filename(slug: str, version_name: str, original_name: Optional[str]
     return f"{safe_slug}-{safe_version}{extension}"
 
 
+def relative_of(path: Path) -> Optional[str]:
+    """把一个绝对路径转成相对 UPLOAD_DIR 的 POSIX 形式；越界返回 None。
+
+    两边都先 resolve()：macOS 上 /var 会解析成 /private/var，
+    拿未解析的根去 relative_to 会直接抛 ValueError。
+    """
+    root = config.UPLOAD_DIR.resolve()
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return None
+    if resolved == root or root not in resolved.parents:
+        return None
+    return resolved.relative_to(root).as_posix()
+
+
+def list_files(subdir: str) -> list:
+    """列出某个上传子目录下的文件（不递归），按文件名排序。"""
+    directory = config.UPLOAD_DIR / subdir
+    if not directory.is_dir():
+        return []
+    return sorted(
+        (item for item in directory.iterdir() if item.is_file()), key=lambda item: item.name
+    )
+
+
 def resolve(relative_path: Optional[str]) -> Optional[Path]:
     """把库里的相对路径还原成绝对路径，越界或不存在返回 None。"""
     if not relative_path:

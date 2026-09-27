@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}AppPublisher{% endblock %}</title>
 <style>
+  /* 后台是一套固定的深色工具界面。公开根页 index.html 有一份**独立**的、
+     跟随系统明暗的配色，两边的变量名与取值都不同 —— 这是刻意的，别去「统一」。 */
   :root {
     --bg:#0f1115; --panel:#171a21; --panel-2:#1d2129; --border:#252b36;
     --text:#e6e9ef; --muted:#8b93a7; --accent:#3b82f6;
@@ -93,12 +95,62 @@
   details summary { cursor:pointer; color:var(--muted); font-size:12px; }
   details[open] summary { margin-bottom:10px; }
 
+  /* ---- 详情页分页 ---- */
+  .tabs {
+    display:flex; gap:4px; overflow-x:auto;
+    margin-bottom:18px; border-bottom:1px solid var(--border);
+  }
+  .tabs a {
+    padding:9px 15px; font-size:13.5px; color:var(--muted); white-space:nowrap;
+    border-bottom:2px solid transparent; margin-bottom:-1px;
+  }
+  .tabs a:hover { color:var(--text); text-decoration:none; }
+  .tabs a.active { color:var(--text); border-bottom-color:var(--accent); font-weight:500; }
+  .panel[hidden] { display:none !important; }
+
+  /* ---- 统计 ---- */
+  .stat-grid {
+    display:grid; gap:12px; margin-bottom:6px;
+    grid-template-columns:repeat(auto-fit, minmax(140px, 1fr));
+  }
+  .stat {
+    background:var(--panel-2); border:1px solid var(--border); border-radius:10px;
+    padding:14px 16px; display:flex; flex-direction:column; gap:2px;
+  }
+  .stat-num { font-size:22px; font-weight:600; letter-spacing:-.02em; }
+  .stat-label { font-size:12px; color:var(--muted); }
+
+  .chart {
+    display:flex; align-items:flex-end; gap:2px; height:140px;
+    padding:10px 0 0; border-bottom:1px solid var(--border); overflow-x:auto;
+  }
+  .chart .bar { flex:1 0 8px; min-width:8px; height:100%; display:flex; align-items:flex-end; }
+  .chart .bar span {
+    display:block; width:100%; min-height:2px; border-radius:3px 3px 0 0;
+    background:var(--accent); opacity:.85;
+  }
+  .chart .bar:hover span { opacity:1; }
+  .chart-axis { display:flex; gap:2px; margin-top:6px; overflow-x:auto; }
+  .chart-axis span {
+    flex:1 0 8px; min-width:8px; text-align:center; font-size:10px; color:var(--muted);
+  }
+
+  table.tight th, table.tight td { padding:6px 8px; }
+
   @media (max-width:760px) {
     .grid2 { grid-template-columns:1fr; }
     .topbar { gap:12px; padding:0 12px; }
     main { padding:16px 12px 48px; }
+    .tabs { gap:0; }
+    .tabs a { padding:9px 11px; font-size:13px; }
   }
 </style>
+<noscript>
+  <!-- 分页的 hidden 是服务端写死的（避免 JS 执行前所有面板闪一下）。
+       禁用 JS 时没有任何东西会去掉它，所以这里强制展开全部面板——
+       否则用户只能看到第一个分页，其余内容等于不可达。 -->
+  <style>.panel[hidden] { display: block !important; }</style>
+</noscript>
 </head>
 <body>
 {% if user %}

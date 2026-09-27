@@ -5,7 +5,10 @@
   <div class="card-head">
     <div>
       <h2>应用</h2>
-      <p class="hint">每个应用对应一个短链，以及一套介绍页 / 更新检查 / 公告接口</p>
+      <p class="hint">
+        每个应用对应一个短链，以及一套介绍页 / 更新检查 / 公告接口。
+        访问与下载为最近 {{ stats_days }} 天的数据。
+      </p>
     </div>
     <a class="btnlink primary" href="/admin/apps/new">新建应用</a>
   </div>
@@ -17,8 +20,9 @@
         <th>名称</th>
         <th>短链</th>
         <th>最新版本</th>
-        <th>发行版</th>
-        <th>公告</th>
+        <th>访问 PV / UV</th>
+        <th>下载</th>
+        <th>内容</th>
         <th>状态</th>
         <th></th>
       </tr>
@@ -26,7 +30,22 @@
     <tbody>
       {% for app in apps %}
       <tr>
-        <td>{{ app.name }}</td>
+        <td>
+          <div style="display:flex;align-items:center;gap:10px">
+            {% if app.banner_path %}
+            <img src="/media/{{ app.banner_path }}" alt=""
+                 style="width:52px;height:30px;object-fit:cover;border-radius:5px;
+                        border:1px solid var(--border);flex:0 0 auto">
+            {% else %}
+            <span style="width:52px;height:30px;border-radius:5px;flex:0 0 auto;
+                         border:1px dashed var(--border)"></span>
+            {% endif %}
+            <span>
+              {{ app.name }}
+              {% if app.tagline %}<div class="muted" style="font-size:12px">{{ app.tagline }}</div>{% endif %}
+            </span>
+          </div>
+        </td>
         <td class="mono">/{{ app.slug }}</td>
         <td>
           {% if app.latest %}
@@ -36,8 +55,9 @@
             <span class="muted">—</span>
           {% endif %}
         </td>
-        <td>{{ app.release_count }}</td>
-        <td>{{ app.notice_count }}</td>
+        <td><span class="mono">{{ app.pv }}</span> <span class="muted">/ {{ app.uv }}</span></td>
+        <td class="mono">{{ app.downloads }}</td>
+        <td class="muted" style="white-space:nowrap">发行版 {{ app.release_count }} · 公告 {{ app.notice_count }}</td>
         <td>
           {% if app.enabled %}<span class="tag on">已上线</span>
           {% else %}<span class="tag off">已下线</span>{% endif %}

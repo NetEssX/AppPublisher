@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -17,10 +18,15 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from .. import config, db, security, storage
+from .. import analytics, config, db, security, storage
 from ..serializers import notice_payload, release_payload
 from ..utils import format_time, human_size, now_ms, redirect_with
-from .public import base_url_for, find_latest_notice, find_latest_release
+from .public import (
+    base_url_for,
+    find_latest_notice,
+    find_latest_release,
+    latest_releases_by_app,
+)
 
 logger = logging.getLogger("apppublisher.admin")
 
@@ -72,6 +78,25 @@ def to_local_input(ms: Optional[int]) -> str:
 
 
 templates.env.filters["local_input"] = to_local_input
+
+
+def normalize_tagline(raw: str) -> str:
+    """一句话简介：折叠空白并截断，避免有人往单行字段里塞一大段。"""
+    return " ".join((raw or "").split())[:200]
+
+
+def normalize_note(raw: str) -> str:
+    """分享链接的备注，同样折叠空白并限长。"""
+    return " ".join((raw or "").split())[:120]
+
+
+def parse_days(raw: Optional[str]) -> int:
+    """统计区间。只接受白名单里的天数，其余一律回落默认值。"""
+    try:
+        value = int(raw or "")
+    except (TypeError, ValueError):
+        return config.STATS_DEFAULT_RANGE_DAYS
+    return value if value in config.STATS_RANGE_CHOICES else config.STATS_DEFAULT_RANGE_DAYS
 
 
 def pretty_json(payload: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -194,19 +219,26 @@ def dashboard(
         row["app_id"]: row["total"]
         for row in db.query_all("SELECT app_id, COUNT(*) AS total FROM notices GROUP BY app_id")
     }
-    # 每个应用取一行：SQL 侧排好序，Python 侧 setdefault 取首行即为该应用的「最新」。
-    latest_by_app: Dict[int, Dict[str, Any]] = {}
-    for row in db.query_all(
-        "SELECT id, app_id, version_name, version_code, is_latest FROM releases "
-        "ORDER BY app_id, is_latest DESC, version_code DESC, id DESC"
-    ):
-        latest_by_app.setdefault(row["app_id"], row)
+    latest_by_app = latest_releases_by_app()
 
+    # 统计同样是一次查询取全，不要再按应用逐个查。
+    totals = analytics.app_totals_map(config.STATS_DEFAULT_RANGE_DAYS)
     for app in apps:
         app["release_count"] = release_counts.get(app["id"], 0)
         app["notice_count"] = notice_counts.get(app["id"], 0)
         app["latest"] = latest_by_app.get(app["id"])
-    return render(request, "apps.html", user=user, apps=apps)
+        app_stats = totals.get(app["id"], {})
+        app["pv"] = (app_stats.get(analytics.KIND_VIEW) or {}).get("pv", 0)
+        app["uv"] = (app_stats.get(analytics.KIND_VIEW) or {}).get("uv", 0)
+        app["downloads"] = (app_stats.get(analytics.KIND_DOWNLOAD) or {}).get("pv", 0)
+
+    return render(
+        request,
+        "apps.html",
+        user=user,
+        apps=apps,
+        stats_days=config.STATS_DEFAULT_RANGE_DAYS,
+    )
 
 
 # ---------------------------------------------------------------- 应用
@@ -224,6 +256,7 @@ def app_create(
     user: Dict[str, Any] = Depends(security.require_csrf),
     slug: str = Form(...),
     name: str = Form(...),
+    tagline: str = Form(""),
     intro_html: str = Form(""),
     intro_file: UploadFile = File(None),
     enabled: str = Form(""),
@@ -246,9 +279,17 @@ def app_create(
 
     timestamp = now_ms()
     app_id = db.execute(
-        "INSERT INTO apps (slug, name, intro_html, enabled, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (slug, name, html, 1 if enabled else 0, timestamp, timestamp),
+        "INSERT INTO apps (slug, name, tagline, intro_html, enabled, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            slug,
+            name,
+            normalize_tagline(tagline),
+            html,
+            1 if enabled else 0,
+            timestamp,
+            timestamp,
+        ),
     )
     return redirect_with(f"/admin/apps/{app_id}", ok=f"应用「{name}」已创建")
 
@@ -280,11 +321,77 @@ def app_detail(
     latest_notice = find_latest_notice(app_id)
     notice_preview = notice_payload(latest_notice) if latest_notice else None
 
+    # 顺手做一次过期明细清理；内部按天去重，不会每个请求都真的删。
+    # 清理是附加动作，失败不该把整个详情页变成 500（record() 也是同样的态度）。
+    try:
+        analytics.purge_old_events()
+    except Exception:  # noqa: BLE001
+        logger.warning("统计明细清理失败", exc_info=True)
+
+    days = parse_days(request.query_params.get("days"))
+    include_bots = request.query_params.get("bots") == "1"
+    stats = {
+        "days": days,
+        "include_bots": include_bots,
+        "choices": config.STATS_RANGE_CHOICES,
+        "summary": analytics.summary(app_id, days, include_bots),
+        "series": analytics.daily_series(app_id, days, include_bots),
+        "referrers": analytics.referrers(app_id, days, include_bots=include_bots),
+        "ua_rows": analytics.ua_breakdown(app_id, days, include_bots),
+        "recent": analytics.recent_downloads(app_id),
+        "retention_days": config.STATS_RETENTION_DAYS,
+    }
+
+    assets = [
+        {
+            "id": row["id"],
+            "path": row["path"],
+            "url": f"{base}/media/{row['path']}",
+            "name": row["original_name"] or row["path"].rsplit("/", 1)[-1],
+            "size": row["size"],
+            "created_at": row["created_at"],
+        }
+        for row in db.query_all("SELECT * FROM assets WHERE app_id = ? ORDER BY id DESC", (app_id,))
+    ]
+
+    # 已经落盘但没有登记归属的图片（本次升级前上传的，或手工放进目录的）。
+    # 不列出来的话它们在界面上等于不存在，用户只会困惑「我传的图去哪了」。
+    known = {row["path"] for row in db.query_all("SELECT path FROM assets")}
+    known.update(
+        row["banner_path"]
+        for row in db.query_all("SELECT banner_path FROM apps WHERE banner_path IS NOT NULL")
+    )
+    unregistered = []
+    for stored in storage.list_files("images"):
+        rel_path = storage.relative_of(stored)
+        if not rel_path or rel_path in known:
+            continue
+        try:
+            size = stored.stat().st_size
+        except OSError:
+            continue
+        unregistered.append(
+            {"path": rel_path, "url": f"{base}/media/{rel_path}", "name": stored.name, "size": size}
+        )
+
+    share_links = analytics.share_link_stats(app_id, days, include_bots)
+    for item in share_links:
+        item["url"] = f"{base}/{app['slug']}/s/{item['code']}"
+        item["target_label"] = analytics.SHARE_TARGET_LABELS.get(item["target"], item["target"])
+
     return render(
         request,
         "app_detail.html",
         user=user,
         app=app,
+        stats=stats,
+        assets=assets,
+        unregistered=unregistered,
+        share_links=share_links,
+        share_target_labels=analytics.SHARE_TARGET_LABELS,
+        # 相对地址给 <img> 用（本机调试时也能直接显示），绝对地址给复制用。
+        banner_url=f"/media/{app['banner_path']}" if app["banner_path"] else "",
+        banner_link=f"{base}/media/{app['banner_path']}" if app["banner_path"] else "",
         releases=releases,
         notices=notices,
         base_url=base,
@@ -301,6 +408,7 @@ def app_update(
     user: Dict[str, Any] = Depends(security.require_csrf),
     slug: str = Form(...),
     name: str = Form(...),
+    tagline: str = Form(""),
     intro_html: str = Form(""),
     intro_file: UploadFile = File(None),
     enabled: str = Form(""),
@@ -326,9 +434,9 @@ def app_update(
         return redirect_with(target, err=str(exc.detail))
 
     db.execute(
-        "UPDATE apps SET slug = ?, name = ?, intro_html = ?, enabled = ?, updated_at = ? "
-        "WHERE id = ?",
-        (slug, name, html, 1 if enabled else 0, now_ms(), app_id),
+        "UPDATE apps SET slug = ?, name = ?, tagline = ?, intro_html = ?, enabled = ?, "
+        "updated_at = ? WHERE id = ?",
+        (slug, name, normalize_tagline(tagline), html, 1 if enabled else 0, now_ms(), app_id),
     )
     return redirect_with(target, ok="已保存")
 
@@ -343,6 +451,13 @@ def app_delete(
         row["build_path"]
         for row in db.query_all("SELECT build_path FROM releases WHERE app_id = ?", (app_id,))
     ]
+    # banner 和其它图片是共享 uploads/images 的，只删具体文件，不要动目录。
+    if app["banner_path"]:
+        build_paths.append(app["banner_path"])
+    # 该应用登记过的图片也要清掉（assets 表里的行会随外键级联删除）。
+    build_paths.extend(
+        row["path"] for row in db.query_all("SELECT path FROM assets WHERE app_id = ?", (app_id,))
+    )
     db.execute("DELETE FROM apps WHERE id = ?", (app_id,))
     # 数据库记录先删干净，再清磁盘；反之若中途失败会留下悬空记录。
     # 单个文件删不掉（权限等）不该让整个请求 500，记日志继续。
@@ -361,7 +476,7 @@ def image_upload(
     user: Dict[str, Any] = Depends(security.require_csrf),
     image: UploadFile = File(...),
 ) -> RedirectResponse:
-    target = f"/admin/apps/{app_id}"
+    target = f"/admin/apps/{app_id}#media"
     require_app(app_id)
     try:
         rel_path, size, _ = storage.save_upload(
@@ -369,8 +484,162 @@ def image_upload(
         )
     except HTTPException as exc:
         return redirect_with(target, err=str(exc.detail))
+
+    try:
+        db.execute(
+            "INSERT INTO assets (app_id, path, original_name, size, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (app_id, rel_path, storage.safe_display_name(image.filename, "image"), size, now_ms()),
+        )
+    except Exception:
+        # 登记失败就把刚落盘的文件删掉。否则它是一个永远不出现在列表里、
+        # 但确实占着磁盘也对外可访问的隐身文件。
+        storage.delete(rel_path)
+        logger.exception("登记图片资源失败 app_id=%s path=%s", app_id, rel_path)
+        return redirect_with(target, err="保存失败，请查看服务端日志")
+
     url = f"{base_url_for(request)}/media/{rel_path}"
     return redirect_with(target, ok=f"图片已上传（{human_size(size)}）：{url}")
+
+
+@router.post("/apps/{app_id}/images/{asset_id}/delete")
+def asset_delete(
+    app_id: int,
+    asset_id: int,
+    user: Dict[str, Any] = Depends(security.require_csrf),
+) -> RedirectResponse:
+    target = f"/admin/apps/{app_id}#media"
+    asset = db.query_one("SELECT * FROM assets WHERE id = ? AND app_id = ?", (asset_id, app_id))
+    if asset is None:
+        # 别的应用的资源不允许从这里删。
+        return redirect_with(target, err="图片不存在或不属于该应用")
+
+    db.execute("DELETE FROM assets WHERE id = ?", (asset_id,))
+    try:
+        storage.delete(asset["path"])
+    except OSError:
+        logger.warning("删除图片文件失败，磁盘上可能残留 %s", asset["path"], exc_info=True)
+    return redirect_with(target, ok=f"已删除 {asset['original_name']}")
+
+
+@router.post("/apps/{app_id}/banner")
+def banner_upload(
+    app_id: int,
+    user: Dict[str, Any] = Depends(security.require_csrf),
+    banner: UploadFile = File(...),
+) -> RedirectResponse:
+    """上传根页卡片顶部的大图。"""
+    target = f"/admin/apps/{app_id}#media"
+    app = require_app(app_id)
+    try:
+        rel_path, size, _ = storage.save_upload(
+            banner, "images", config.IMAGE_EXTENSIONS, config.MAX_IMAGE_BYTES
+        )
+    except HTTPException as exc:
+        return redirect_with(target, err=str(exc.detail))
+
+    previous = app["banner_path"]
+    db.execute(
+        "UPDATE apps SET banner_path = ?, updated_at = ? WHERE id = ?",
+        (rel_path, now_ms(), app_id),
+    )
+    # 先换引用再删旧文件：顺序反过来时，删失败会让 banner_path 指向一个已不存在的文件，
+    # 前台就成了裂图。留着孤儿文件只是浪费一点磁盘。
+    if previous:
+        try:
+            storage.delete(previous)
+        except OSError:
+            logger.warning("删除旧 banner 失败，磁盘上可能残留 %s", previous, exc_info=True)
+    return redirect_with(target, ok=f"封面已更新（{human_size(size)}）")
+
+
+@router.post("/apps/{app_id}/banner/delete")
+def banner_delete(
+    app_id: int,
+    user: Dict[str, Any] = Depends(security.require_csrf),
+) -> RedirectResponse:
+    target = f"/admin/apps/{app_id}#media"
+    app = require_app(app_id)
+    if not app["banner_path"]:
+        return redirect_with(target, err="当前没有封面图")
+
+    db.execute(
+        "UPDATE apps SET banner_path = NULL, updated_at = ? WHERE id = ?", (now_ms(), app_id)
+    )
+    try:
+        storage.delete(app["banner_path"])
+    except OSError:
+        logger.warning("删除 banner 文件失败，磁盘上可能残留 %s", app["banner_path"], exc_info=True)
+    return redirect_with(target, ok="封面已移除")
+
+
+# ---------------------------------------------------------------- 分享链接
+
+
+@router.post("/apps/{app_id}/share")
+def share_create(
+    app_id: int,
+    user: Dict[str, Any] = Depends(security.require_csrf),
+    note: str = Form(""),
+    target: str = Form("intro"),
+) -> RedirectResponse:
+    anchor = f"/admin/apps/{app_id}#share"
+    require_app(app_id)
+
+    note_value = normalize_note(note)
+    target_value = target if target in analytics.SHARE_TARGETS else "intro"
+
+    # 直接靠 code 上的 UNIQUE 约束避碰，不做「先查再插」——
+    # 那两步之间有窗口，并发请求可能同时选中同一个码。
+    # 撞了就换一个重试，比先查一次少一条查询，也没有竞态。
+    for _ in range(10):
+        candidate = analytics.generate_share_code()
+        try:
+            db.execute(
+                "INSERT INTO share_links (app_id, code, note, target, enabled, created_at) "
+                "VALUES (?, ?, ?, ?, 1, ?)",
+                (app_id, candidate, note_value, target_value, now_ms()),
+            )
+        except sqlite3.IntegrityError:
+            continue
+        return redirect_with(anchor, ok=f"分享链接已生成（{candidate}）")
+
+    logger.error("生成分享码连续冲突 app_id=%s", app_id)
+    return redirect_with(anchor, err="生成分享码失败，请重试")
+
+
+@router.post("/apps/{app_id}/share/{link_id}/toggle")
+def share_toggle(
+    app_id: int,
+    link_id: int,
+    user: Dict[str, Any] = Depends(security.require_csrf),
+) -> RedirectResponse:
+    anchor = f"/admin/apps/{app_id}#share"
+    link = db.query_one("SELECT * FROM share_links WHERE id = ? AND app_id = ?", (link_id, app_id))
+    if link is None:
+        return redirect_with(anchor, err="分享链接不存在")
+
+    db.execute(
+        "UPDATE share_links SET enabled = ? WHERE id = ?", (0 if link["enabled"] else 1, link_id)
+    )
+    return redirect_with(anchor, ok="已停用，链接仍会跳转但不再归因" if link["enabled"] else "已启用")
+
+
+@router.post("/apps/{app_id}/share/{link_id}/delete")
+def share_delete(
+    app_id: int,
+    link_id: int,
+    user: Dict[str, Any] = Depends(security.require_csrf),
+) -> RedirectResponse:
+    anchor = f"/admin/apps/{app_id}#share"
+    link = db.query_one("SELECT * FROM share_links WHERE id = ? AND app_id = ?", (link_id, app_id))
+    if link is None:
+        return redirect_with(anchor, err="分享链接不存在")
+
+    # 只删链接本身，**保留** events 里已记录的 share_code：
+    # 历史归因数据不该因为清理链接而消失，统计查询 join 不上时自然忽略。
+    db.execute("DELETE FROM share_links WHERE id = ?", (link_id,))
+    return redirect_with(anchor, ok=f"已删除分享链接「{link['note'] or link['code']}」")
 
 
 # ---------------------------------------------------------------- 发行版
@@ -388,7 +657,7 @@ def release_create(
     released_at: str = Form(""),
     build: UploadFile = File(...),
 ) -> RedirectResponse:
-    target = f"/admin/apps/{app_id}"
+    target = f"/admin/apps/{app_id}#releases"
     require_app(app_id)
 
     version_name = version_name.strip()
@@ -469,7 +738,7 @@ def release_update(
     force_update: str = Form(""),
     released_at: str = Form(""),
 ) -> RedirectResponse:
-    target = f"/admin/apps/{app_id}"
+    target = f"/admin/apps/{app_id}#releases"
     release = db.query_one(
         "SELECT * FROM releases WHERE id = ? AND app_id = ?", (release_id, app_id)
     )
@@ -503,7 +772,7 @@ def release_set_latest(
     release_id: int,
     user: Dict[str, Any] = Depends(security.require_csrf),
 ) -> RedirectResponse:
-    target = f"/admin/apps/{app_id}"
+    target = f"/admin/apps/{app_id}#releases"
     release = db.query_one(
         "SELECT * FROM releases WHERE id = ? AND app_id = ?", (release_id, app_id)
     )
@@ -522,7 +791,7 @@ def release_delete(
     release_id: int,
     user: Dict[str, Any] = Depends(security.require_csrf),
 ) -> RedirectResponse:
-    target = f"/admin/apps/{app_id}"
+    target = f"/admin/apps/{app_id}#releases"
     release = db.query_one(
         "SELECT * FROM releases WHERE id = ? AND app_id = ?", (release_id, app_id)
     )
@@ -563,7 +832,7 @@ def notice_create(
     content: str = Form(""),
     published_at: str = Form(""),
 ) -> RedirectResponse:
-    target = f"/admin/apps/{app_id}"
+    target = f"/admin/apps/{app_id}#notices"
     require_app(app_id)
 
     title = title.strip()
@@ -588,7 +857,7 @@ def notice_update(
     content: str = Form(""),
     published_at: str = Form(""),
 ) -> RedirectResponse:
-    target = f"/admin/apps/{app_id}"
+    target = f"/admin/apps/{app_id}#notices"
     notice = db.query_one(
         "SELECT * FROM notices WHERE id = ? AND app_id = ?", (notice_id, app_id)
     )
@@ -620,7 +889,7 @@ def notice_delete(
     notice_id: int,
     user: Dict[str, Any] = Depends(security.require_csrf),
 ) -> RedirectResponse:
-    target = f"/admin/apps/{app_id}"
+    target = f"/admin/apps/{app_id}#notices"
     notice = db.query_one(
         "SELECT * FROM notices WHERE id = ? AND app_id = ?", (notice_id, app_id)
     )

@@ -72,8 +72,19 @@ SESSION_MAX_AGE = _int_env("SESSION_MAX_AGE", 60 * 60 * 24 * 7)
 # 仅在 HTTPS 下开启；本地 http 调试时必须为 0，否则浏览器不保存 Cookie。
 COOKIE_SECURE = _bool_env("COOKIE_SECURE", False)
 COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "lax").strip().lower() or "lax"
+# 记录「这次访问是从哪个分享链接来的」的第一方 Cookie。30 天后自然过期。
+SHARE_COOKIE_NAME = os.getenv("SHARE_COOKIE_NAME", "apppublisher_share")
+SHARE_COOKIE_MAX_AGE = _int_env("SHARE_COOKIE_MAX_AGE", 60 * 60 * 24 * 30)
 # 登录页专用的 CSRF Cookie（双提交校验）。此时还没有会话，所以单独放一个随机值。
 CSRF_COOKIE_NAME = os.getenv("CSRF_COOKIE_NAME", "apppublisher_csrf")
+
+# ---------------------------------------------------------------- 访问统计
+# 原始事件明细的保留天数，超期由 analytics.purge_old_events() 清理。
+STATS_RETENTION_DAYS = _int_env("STATS_RETENTION_DAYS", 180)
+STATS_DEFAULT_RANGE_DAYS = _int_env("STATS_DEFAULT_RANGE_DAYS", 30)
+STATS_RANGE_CHOICES = (7, 30, 90, 180)
+# 只有反向代理已经覆写 X-Forwarded-For 时才可开启；直连时开启等于允许客户端伪造来源 IP。
+TRUST_PROXY_HEADERS = _bool_env("TRUST_PROXY_HEADERS", False)
 
 # ---------------------------------------------------------------- 上传限制
 # 兼容旧配置名 MAX_APK_MB：MAX_BUILD_MB 没设时回落到它。
