@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}登录 · AppPublisher{% endblock %}
+{% block body %}
+<div class="card" style="max-width:400px;margin:8vh auto 0">
+  <h2>登录后台</h2>
+  <p class="hint">AppPublisher · 应用发布与更新检查</p>
+  <form method="post" action="/admin/login">
+    <input type="hidden" name="next" value="{{ next_url }}">
+    <label>用户名</label>
+    <input type="text" name="username" required autofocus autocomplete="username">
+    <label>密码</label>
+    <input type="password" name="password" required autocomplete="current-password">
+    <div style="margin-top:22px">
+      <button type="submit" style="width:100%">登录</button>
+    </div>
+  </form>
+</div>
+{% endblock %}

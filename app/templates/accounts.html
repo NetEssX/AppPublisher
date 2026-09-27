@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}账号 · AppPublisher{% endblock %}
+{% block body %}
+
+<div class="card">
+  <div class="card-head">
+    <div>
+      <h2>账号</h2>
+      <p class="hint">超级管理员可以管理全部应用与账号；普通管理员只能管理应用。</p>
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>用户名</th><th>显示名</th><th>权限</th><th>创建时间</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for row in users %}
+      <tr>
+        <td>{{ row.username }}{% if row.id == user.id %} <span class="tag">我自己</span>{% endif %}</td>
+        <td class="muted">{{ row.display_name or '—' }}</td>
+        <td>
+          {% if row.is_super %}<span class="tag info">超级管理员</span>
+          {% else %}<span class="tag">普通管理员</span>{% endif %}
+        </td>
+        <td class="muted">{{ row.created_at | format_time }}</td>
+        <td style="text-align:right;white-space:nowrap">
+          <form method="post" action="/admin/accounts/{{ row.id }}/password" style="display:inline"
+                onsubmit="return confirm('确认重置 {{ row.username }} 的密码？该账号所有登录会失效。')">
+            <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+            <input type="password" name="new_password" placeholder="新密码" required minlength="8"
+                   style="width:130px;display:inline-block;padding:5px 10px;font-size:12px">
+            <button class="ghost small" type="submit">重置密码</button>
+          </form>
+          {% if row.id != user.id %}
+          <form method="post" action="/admin/accounts/{{ row.id }}/delete" style="display:inline"
+                onsubmit="return confirm('确认删除账号 {{ row.username }}？')">
+            <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+            <button class="danger small" type="submit">删除</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>新建账号</h2>
+  <p class="hint">用户名只能用字母、数字、下划线、点、连字符；密码至少 8 位。</p>
+  <form method="post" action="/admin/accounts">
+    <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+    <div class="grid2">
+      <div>
+        <label>用户名</label>
+        <input type="text" name="username" required minlength="3" maxlength="32" autocomplete="off">
+      </div>
+      <div>
+        <label>显示名（可选）</label>
+        <input type="text" name="display_name" autocomplete="off">
+      </div>
+    </div>
+    <label>初始密码（至少 8 位）</label>
+    <input type="password" name="password" required minlength="8" autocomplete="new-password">
+    <label style="display:flex;align-items:center;gap:8px;margin-top:16px">
+      <input type="checkbox" name="is_super" value="1"> 授予超级管理员权限
+    </label>
+    <div style="margin-top:20px"><button type="submit">创建账号</button></div>
+  </form>
+</div>
+
+{% endblock %}

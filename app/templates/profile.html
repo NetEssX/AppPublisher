@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}修改密码 · AppPublisher{% endblock %}
+{% block body %}
+<div class="card" style="max-width:460px">
+  <h2>修改密码</h2>
+  <p class="hint">当前账号：{{ user.username }}</p>
+  <form method="post" action="/admin/profile/password">
+    <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+    <label>当前密码</label>
+    <input type="password" name="current_password" required autocomplete="current-password">
+    <label>新密码（至少 8 位）</label>
+    <input type="password" name="new_password" required minlength="8" autocomplete="new-password">
+    <label>确认新密码</label>
+    <input type="password" name="confirm_password" required minlength="8" autocomplete="new-password">
+    <div style="margin-top:22px">
+      <button type="submit">更新密码</button>
+    </div>
+    <p class="hint" style="margin-top:14px">改密码会让该账号在所有设备上的登录失效，当前浏览器会自动续期。</p>
+  </form>
+</div>
+{% endblock %}

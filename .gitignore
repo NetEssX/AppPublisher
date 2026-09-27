@@ -1,0 +1,15 @@
+# 运行期数据：数据库、上传的 APK 与图片、自动生成的密钥
+data/
+
+# 本地配置（含管理员密码、SECRET_KEY），务必不要提交
+.env
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store

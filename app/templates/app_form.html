@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}新建应用 · AppPublisher{% endblock %}
+{% block body %}
+<form class="card" method="post" action="/admin/apps" enctype="multipart/form-data">
+  <h2>新建应用</h2>
+  <p class="hint">
+    短链决定访问地址：短链填 <span class="mono">QUTSchedule</span>，用户就访问
+    <span class="mono">/QUTSchedule</span>，更新检查接口即 <span class="mono">/QUTSchedule/releases/latest</span>。
+  </p>
+
+  <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+
+  <div class="grid2">
+    <div>
+      <label>应用名称</label>
+      <input type="text" name="name" required placeholder="QUT课表">
+    </div>
+    <div>
+      <label>短链（URL 路径）</label>
+      <input type="text" name="slug" required placeholder="QUTSchedule">
+    </div>
+  </div>
+
+  <label>介绍页 HTML</label>
+  <textarea name="intro_html" rows="16" placeholder="&lt;!doctype html&gt;&#10;&lt;html&gt;…&lt;/html&gt;"></textarea>
+  <p class="hint" style="margin-top:6px">
+    这段 HTML 会原样输出到 <span class="mono">/短链</span>。留空时可先创建，之后再补。
+  </p>
+
+  <label>或上传 HTML 文件（若选择，将覆盖上面的文本框内容）</label>
+  <input type="file" name="intro_file" accept=".html,.htm,.txt">
+
+  <label style="display:flex;align-items:center;gap:8px;margin-top:18px">
+    <input type="checkbox" name="enabled" value="1" checked> 立即上线
+  </label>
+
+  <div style="margin-top:22px;display:flex;gap:10px;align-items:center">
+    <button type="submit">创建</button>
+    <a class="btnlink" href="/admin">取消</a>
+  </div>
+</form>
+{% endblock %}

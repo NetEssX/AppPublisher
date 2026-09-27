@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}AppPublisher{% endblock %}</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --panel-2:#1d2129; --border:#252b36;
+    --text:#e6e9ef; --muted:#8b93a7; --accent:#3b82f6;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--text); font-size:14px; line-height:1.6;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  }
+  a { color:var(--accent); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+
+  .topbar {
+    display:flex; align-items:center; gap:20px; height:56px; padding:0 20px;
+    background:var(--panel); border-bottom:1px solid var(--border);
+    position:sticky; top:0; z-index:10;
+  }
+  .brand { font-weight:600; font-size:15px; color:var(--text); }
+  .brand:hover { text-decoration:none; }
+  .topbar nav { display:flex; gap:16px; }
+  .spacer { flex:1; }
+  .who { color:var(--muted); font-size:13px; }
+
+  main { max-width:1080px; margin:0 auto; padding:24px 20px 64px; }
+
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:20px; margin-bottom:20px; }
+  .card h2 { margin:0 0 4px; font-size:16px; }
+  .card .hint { color:var(--muted); font-size:12px; margin:0 0 16px; }
+  .card-head { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; }
+
+  label { display:block; font-size:13px; color:var(--muted); margin:14px 0 6px; }
+  input[type=text], input[type=password], input[type=number], input[type=datetime-local], textarea {
+    width:100%; padding:9px 12px; background:var(--panel-2); border:1px solid var(--border);
+    border-radius:8px; color:var(--text); font-size:14px; font-family:inherit;
+  }
+  input[type=file] {
+    width:100%; padding:9px 12px; background:var(--panel-2); border:1px dashed var(--border);
+    border-radius:8px; color:var(--muted); font-size:13px;
+  }
+  input[type=checkbox] { width:auto; accent-color:var(--accent); }
+  textarea { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:13px; resize:vertical; }
+  input:focus, textarea:focus { outline:none; border-color:var(--accent); }
+
+  button {
+    padding:9px 18px; border-radius:8px; border:1px solid transparent; background:var(--accent);
+    color:#fff; font-size:14px; font-family:inherit; cursor:pointer;
+  }
+  button:hover { filter:brightness(1.12); }
+  button.ghost { background:transparent; border-color:var(--border); color:var(--muted); }
+  button.danger { background:transparent; border-color:#5b2b2b; color:#ff9b9b; }
+  button.small { padding:5px 12px; font-size:12px; }
+
+  .btnlink {
+    display:inline-block; padding:5px 12px; border-radius:8px; border:1px solid var(--border);
+    color:var(--muted); font-size:12px;
+  }
+  .btnlink:hover { text-decoration:none; border-color:var(--accent); color:var(--accent); }
+  .btnlink.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .btnlink.primary:hover { color:#fff; filter:brightness(1.12); }
+
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--border); vertical-align:middle; }
+  th { color:var(--muted); font-weight:500; font-size:12px; }
+  tr:last-child td { border-bottom:none; }
+
+  pre {
+    background:#0b0d11; border:1px solid var(--border); border-radius:8px; padding:14px;
+    overflow:auto; font-size:12px; color:#9ecbff; margin:0;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  .mono { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12px; }
+  .muted { color:var(--muted); }
+
+  .flash { padding:11px 16px; border-radius:8px; margin-bottom:18px; font-size:13px; }
+  .flash.ok { background:rgba(34,197,94,.12); border:1px solid rgba(34,197,94,.35); color:#86efac; }
+  .flash.err { background:rgba(239,68,68,.12); border:1px solid rgba(239,68,68,.35); color:#fca5a5; }
+
+  .tag { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; border:1px solid var(--border); color:var(--muted); }
+  .tag.on { color:#86efac; border-color:rgba(34,197,94,.4); }
+  .tag.off { color:#fca5a5; border-color:rgba(239,68,68,.35); }
+  .tag.info { color:#9ecbff; border-color:rgba(59,130,246,.4); }
+
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:0 20px; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; }
+  .row > * { flex:1; min-width:150px; }
+  details summary { cursor:pointer; color:var(--muted); font-size:12px; }
+  details[open] summary { margin-bottom:10px; }
+
+  @media (max-width:760px) {
+    .grid2 { grid-template-columns:1fr; }
+    .topbar { gap:12px; padding:0 12px; }
+    main { padding:16px 12px 48px; }
+  }
+</style>
+</head>
+<body>
+{% if user %}
+<header class="topbar">
+  <a class="brand" href="/admin">AppPublisher</a>
+  <nav>
+    <a href="/admin">应用</a>
+    {% if user.is_super %}<a href="/admin/accounts">账号</a>{% endif %}
+    <a href="/admin/profile">密码</a>
+  </nav>
+  <div class="spacer"></div>
+  <span class="who">{{ user.display_name or user.username }}{% if user.is_super %} · 超管{% endif %}</span>
+  <form method="post" action="/admin/logout"><button class="ghost small">退出</button></form>
+</header>
+{% endif %}
+<main>
+  {% if err %}<div class="flash err">{{ err }}</div>{% endif %}
+  {% if ok %}<div class="flash ok">{{ ok }}</div>{% endif %}
+  {% block body %}{% endblock %}
+</main>
+</body>
+</html>

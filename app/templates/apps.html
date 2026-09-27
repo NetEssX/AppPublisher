@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}应用 · AppPublisher{% endblock %}
+{% block body %}
+<div class="card">
+  <div class="card-head">
+    <div>
+      <h2>应用</h2>
+      <p class="hint">每个应用对应一个短链，以及一套介绍页 / 更新检查 / 公告接口</p>
+    </div>
+    <a class="btnlink primary" href="/admin/apps/new">新建应用</a>
+  </div>
+
+  {% if apps %}
+  <table>
+    <thead>
+      <tr>
+        <th>名称</th>
+        <th>短链</th>
+        <th>最新版本</th>
+        <th>发行版</th>
+        <th>公告</th>
+        <th>状态</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for app in apps %}
+      <tr>
+        <td>{{ app.name }}</td>
+        <td class="mono">/{{ app.slug }}</td>
+        <td>
+          {% if app.latest %}
+            {{ app.latest.version_name }}
+            <span class="mono muted">{{ app.latest.version_code }}</span>
+          {% else %}
+            <span class="muted">—</span>
+          {% endif %}
+        </td>
+        <td>{{ app.release_count }}</td>
+        <td>{{ app.notice_count }}</td>
+        <td>
+          {% if app.enabled %}<span class="tag on">已上线</span>
+          {% else %}<span class="tag off">已下线</span>{% endif %}
+        </td>
+        <td style="text-align:right;white-space:nowrap">
+          <a class="btnlink" href="/{{ app.slug }}" target="_blank" rel="noopener">页面</a>
+          <a class="btnlink" href="/admin/apps/{{ app.id }}">管理</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">还没有应用。点右上角「新建应用」开始。</p>
+  {% endif %}
+</div>
+{% endblock %}
