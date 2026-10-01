@@ -1535,6 +1535,200 @@ def main() -> int:
     finally:
         shutil.rmtree(legacy2, ignore_errors=True)
 
+    print("\n[14] API 密钥与应用归属")
+    from app import db as apidb
+
+    with TestClient(app) as admin:
+        admin.post(
+            "/admin/login",
+            data={
+                "username": "admin",
+                "password": "smoke-test-password",
+                "csrf_token": csrf_of(admin, "/admin/login"),
+            },
+            follow_redirects=False,
+        )
+
+        # ---- 密钥管理 ----
+        page = admin.get("/admin/api-keys")
+        check("密钥管理页可访问", page.status_code == 200 and "API 密钥" in page.text)
+
+        created = admin.post(
+            "/admin/api-keys",
+            data={"csrf_token": csrf_of(admin, "/admin/api-keys"), "name": "CI 发布机"},
+            follow_redirects=False,
+        )
+        key_match = re.search(r'value="(ap_[A-Za-z0-9_-]+)"', created.text)
+        check("创建后在页面上一次性展示明文密钥", key_match is not None)
+        master_key = key_match.group(1) if key_match else ""
+        key_row = apidb.query_one("SELECT * FROM api_keys ORDER BY id DESC LIMIT 1")
+        check(
+            "库里只存哈希，不存明文",
+            key_row and key_row["key_hash"] != master_key and len(key_row["key_hash"]) == 64,
+        )
+        check("记录前缀便于辨认", bool(key_row) and master_key.startswith("ap_" + key_row["prefix"]))
+
+        # ---- 鉴权 ----
+        check("无密钥返回 401", admin.get("/api/v1/me").status_code == 401)
+        check(
+            "错误密钥返回 401",
+            admin.get(
+                "/api/v1/me", headers={"Authorization": "Bearer ap_totallywrongvalue"}
+            ).status_code
+            == 401,
+        )
+        hdr = {"Authorization": f"Bearer {master_key}"}
+        me = admin.get("/api/v1/me", headers=hdr)
+        check("有效密钥可访问 /me", me.status_code == 200 and me.json()["username"] == "admin", me.text[:120])
+        check(
+            "也接受 X-API-Key 写法",
+            admin.get("/api/v1/me", headers={"X-API-Key": master_key}).status_code == 200,
+        )
+
+        # ---- 用密钥走完整流程 ----
+        made = admin.post(
+            "/api/v1/apps",
+            headers=hdr,
+            json={"slug": "ApiMade", "name": "API 建的应用", "tagline": "来自密钥"},
+        )
+        check("API 创建应用返回 201", made.status_code == 201, f"{made.status_code} {made.text[:120]}")
+        api_app = made.json()
+        check("归属写入为密钥所属账号", api_app["owner_id"] == me.json()["user_id"], str(api_app.get("owner_id")))
+
+        rel = admin.post(
+            "/api/v1/apps/ApiMade/releases",
+            headers=hdr,
+            data={"version_name": "v1.0.0", "version_code": "1000001", "description": "首个版本"},
+            files={"file": ("api.apk", APK_BYTES, "application/octet-stream")},
+        )
+        check("API 上传发行版返回 201", rel.status_code == 201, f"{rel.status_code} {rel.text[:160]}")
+        check("公开接口能读到刚发的版本", admin.get("/ApiMade/releases/latest").status_code == 200)
+
+        img = admin.post(
+            "/api/v1/apps/ApiMade/images",
+            headers=hdr,
+            files={"file": ("shot.png", PNG_BYTES, "image/png")},
+        )
+        check("API 上传图片返回 201", img.status_code == 201, img.text[:120])
+        check("返回可访问的图片地址", "/media/images/" in img.json().get("url", ""))
+
+        notice = admin.post(
+            "/api/v1/apps/ApiMade/notices", headers=hdr, json={"title": "API 公告", "content": "正文"}
+        )
+        check("API 发布公告返回 201", notice.status_code == 201, notice.text[:120])
+        check("公开接口能读到刚发的公告", admin.get("/ApiMade/notices/latest").json()["title"] == "API 公告")
+
+        patched = admin.patch("/api/v1/apps/ApiMade", headers=hdr, json={"tagline": "改过的简介"})
+        check(
+            "PATCH 只改传入的字段",
+            patched.status_code == 200 and patched.json()["tagline"] == "改过的简介",
+            patched.text[:120],
+        )
+
+        # ---- 归属隔离 ----
+        admin.post(
+            "/admin/accounts",
+            data={
+                "csrf_token": csrf_of(admin, "/admin/accounts"),
+                "username": "apiuser",
+                "password": "apiuser-password-1",
+            },
+            follow_redirects=False,
+        )
+        other = TestClient(app)
+        other.post(
+            "/admin/login",
+            data={
+                "username": "apiuser",
+                "password": "apiuser-password-1",
+                "csrf_token": csrf_of(other, "/admin/login"),
+            },
+            follow_redirects=False,
+        )
+        other_key = re.search(
+            r'value="(ap_[A-Za-z0-9_-]+)"',
+            other.post(
+                "/admin/api-keys",
+                data={"csrf_token": csrf_of(other, "/admin/api-keys"), "name": "别人的密钥"},
+                follow_redirects=False,
+            ).text,
+        ).group(1)
+        ohdr = {"Authorization": f"Bearer {other_key}"}
+
+        other_list = admin.get("/api/v1/apps", headers=ohdr).json()
+        check("普通账号的密钥看不到别人的应用", other_list["count"] == 0, str(other_list))
+        check(
+            "按短链访问别人的应用返回 404",
+            admin.get("/api/v1/apps/ApiMade", headers=ohdr).status_code == 404,
+        )
+        check("删不掉别人的应用", admin.delete("/api/v1/apps/ApiMade", headers=ohdr).status_code == 404)
+        check(
+            "改不了别人的应用",
+            admin.patch("/api/v1/apps/ApiMade", headers=ohdr, json={"name": "x"}).status_code == 404,
+        )
+        check(
+            "删不掉别人的发行版",
+            admin.delete("/api/v1/apps/ApiMade/releases/1000001", headers=ohdr).status_code == 404,
+        )
+        check(
+            "改不了别人的公告",
+            admin.patch(
+                "/api/v1/apps/ApiMade/notices/1", headers=ohdr, json={"title": "x"}
+            ).status_code
+            == 404,
+        )
+        check("超管仍能看到全部应用", admin.get("/api/v1/apps", headers=hdr).json()["count"] >= 1)
+
+        # 网页后台必须同步收敛，否则会出现「网页里能改、API 里不能改」
+        check("网页后台列表也按归属过滤", "ApiMade" not in other.get("/admin").text)
+        check(
+            "网页后台直接访问别人的应用返回 404",
+            other.get(f"/admin/apps/{api_app['id']}").status_code == 404,
+        )
+        blocked = other.post(
+            f"/admin/apps/{api_app['id']}/releases/1/delete",
+            data={"csrf_token": csrf_of(other, "/admin")},
+            follow_redirects=False,
+        )
+        check(
+            "网页后台写别人的应用被 404 挡下",
+            blocked.status_code == 404,
+            f"status={blocked.status_code}",
+        )
+        check(
+            "被挡下后对方的数据完好",
+            apidb.query_value(
+                "SELECT COUNT(*) FROM releases WHERE app_id = ?", (api_app["id"],)
+            )
+            == 1,
+        )
+
+        # 422 回归：RequestValidationError 没有 status_code 属性，
+        # 处理器里写 exc.status_code 会抛 AttributeError → 变成 500。
+        bad_query = admin.get("/api/v1/apps/ApiMade/stats?days=abc", headers=hdr)
+        check(
+            "/api 参数类型不对时返回 422 而非 500",
+            bad_query.status_code == 422,
+            f"status={bad_query.status_code} {bad_query.text[:120]}",
+        )
+        check(
+            "422 的 error 是可读字符串",
+            isinstance(bad_query.json().get("error"), str),
+            bad_query.text[:120],
+        )
+        check(
+            "公开路由的参数校验仍是 422",
+            admin.get("/QUTSchedule/build/notanumber").status_code == 422,
+        )
+
+        # 撤销 ----
+        admin.post(
+            f"/admin/api-keys/{key_row['id']}/revoke",
+            data={"csrf_token": csrf_of(admin, "/admin/api-keys")},
+            follow_redirects=False,
+        )
+        check("撤销后该密钥立即失效", admin.get("/api/v1/me", headers=hdr).status_code == 401)
+
     print(f"\n通过 {passed} 项，失败 {len(failed)} 项")
     if failed:
         for label in failed:

@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from .. import analytics, config, db, security, storage
+from .. import analytics, apikeys, config, db, security, services, storage
 from ..serializers import notice_payload, release_payload
 from ..utils import format_time, human_size, now_ms, redirect_with
 from .public import (
@@ -91,12 +91,8 @@ def normalize_note(raw: str) -> str:
 
 
 def parse_days(raw: Optional[str]) -> int:
-    """统计区间。只接受白名单里的天数，其余一律回落默认值。"""
-    try:
-        value = int(raw or "")
-    except (TypeError, ValueError):
-        return config.STATS_DEFAULT_RANGE_DAYS
-    return value if value in config.STATS_RANGE_CHOICES else config.STATS_DEFAULT_RANGE_DAYS
+    """统计区间。委托给 config.clamp_days()，与 JSON API 共用同一份白名单逻辑。"""
+    return config.clamp_days(raw)
 
 
 def pretty_json(payload: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -105,11 +101,15 @@ def pretty_json(payload: Optional[Dict[str, Any]]) -> Optional[str]:
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
-def require_app(app_id: int) -> Dict[str, Any]:
-    app = db.query_one("SELECT * FROM apps WHERE id = ?", (app_id,))
-    if app is None:
-        raise HTTPException(status_code=404, detail="应用不存在")
-    return app
+def require_app(app_id: int, user: Dict[str, Any]) -> Dict[str, Any]:
+    """取应用并校验归属。规则与 JSON API 完全一致 —— 都走 services.require_app()。
+
+    无权时按 404 处理而不是 403：不向对方泄露「这个应用存在，只是不属于你」。
+    """
+    try:
+        return services.require_app(app_id, user)
+    except services.ServiceError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.message) from exc
 
 
 def read_intro_text(intro_html: str, intro_file: Optional[UploadFile]) -> str:
@@ -208,7 +208,8 @@ def logout(user: Dict[str, Any] = Depends(security.require_csrf)) -> RedirectRes
 def dashboard(
     request: Request, user: Dict[str, Any] = Depends(security.get_current_user)
 ) -> HTMLResponse:
-    apps = db.query_all("SELECT * FROM apps ORDER BY id DESC")
+    # 超管看全部，其他人只看自己创建的（与 JSON API 同一条规则）。
+    apps = services.visible_apps(user)
 
     # 三条聚合查询搞定，避免每个应用各查 3 次的 N+1。
     release_counts = {
@@ -262,35 +263,23 @@ def app_create(
     enabled: str = Form(""),
 ) -> RedirectResponse:
     try:
-        slug = config.validate_slug(slug)
-    except ValueError as exc:
-        return redirect_with("/admin/apps/new", err=str(exc))
-
-    name = name.strip()
-    if not name:
-        return redirect_with("/admin/apps/new", err="应用名称不能为空")
-    if db.query_one("SELECT id FROM apps WHERE slug = ?", (slug,)):
-        return redirect_with("/admin/apps/new", err=f"短链 /{slug} 已被占用")
-
-    try:
         html = read_intro_text(intro_html, intro_file)
     except HTTPException as exc:
         return redirect_with("/admin/apps/new", err=str(exc.detail))
 
-    timestamp = now_ms()
-    app_id = db.execute(
-        "INSERT INTO apps (slug, name, tagline, intro_html, enabled, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (
-            slug,
-            name,
-            normalize_tagline(tagline),
-            html,
-            1 if enabled else 0,
-            timestamp,
-            timestamp,
-        ),
-    )
+    try:
+        # 校验、查重、入库都在 services 里，与 JSON API 共用同一份实现。
+        app_id = services.create_app(
+            slug=slug,
+            name=name,
+            tagline=tagline,
+            intro_html=html,
+            enabled=bool(enabled),
+            owner_id=user["id"],
+        )
+    except services.ServiceError as exc:
+        return redirect_with("/admin/apps/new", err=exc.message)
+
     return redirect_with(f"/admin/apps/{app_id}", ok=f"应用「{name}」已创建")
 
 
@@ -300,7 +289,7 @@ def app_detail(
     app_id: int,
     user: Dict[str, Any] = Depends(security.get_current_user),
 ) -> HTMLResponse:
-    app = require_app(app_id)
+    app = require_app(app_id, user)
     releases = db.query_all(
         "SELECT * FROM releases WHERE app_id = ? ORDER BY version_code DESC, id DESC",
         (app_id,),
@@ -379,11 +368,18 @@ def app_detail(
         item["url"] = f"{base}/{app['slug']}/s/{item['code']}"
         item["target_label"] = analytics.SHARE_TARGET_LABELS.get(item["target"], item["target"])
 
+    owner = None
+    if app["owner_id"]:
+        owner = db.query_one(
+            "SELECT id, username, display_name FROM users WHERE id = ?", (app["owner_id"],)
+        )
+
     return render(
         request,
         "app_detail.html",
         user=user,
         app=app,
+        owner=owner,
         stats=stats,
         assets=assets,
         unregistered=unregistered,
@@ -413,7 +409,7 @@ def app_update(
     intro_file: UploadFile = File(None),
     enabled: str = Form(""),
 ) -> RedirectResponse:
-    require_app(app_id)
+    require_app(app_id, user)
     target = f"/admin/apps/{app_id}"
 
     try:
@@ -446,7 +442,7 @@ def app_delete(
     app_id: int,
     user: Dict[str, Any] = Depends(security.require_csrf),
 ) -> RedirectResponse:
-    app = require_app(app_id)
+    app = require_app(app_id, user)
     build_paths = [
         row["build_path"]
         for row in db.query_all("SELECT build_path FROM releases WHERE app_id = ?", (app_id,))
@@ -477,7 +473,7 @@ def image_upload(
     image: UploadFile = File(...),
 ) -> RedirectResponse:
     target = f"/admin/apps/{app_id}#media"
-    require_app(app_id)
+    require_app(app_id, user)
     try:
         rel_path, size, _ = storage.save_upload(
             image, "images", config.IMAGE_EXTENSIONS, config.MAX_IMAGE_BYTES
@@ -509,6 +505,7 @@ def asset_delete(
     user: Dict[str, Any] = Depends(security.require_csrf),
 ) -> RedirectResponse:
     target = f"/admin/apps/{app_id}#media"
+    require_app(app_id, user)
     asset = db.query_one("SELECT * FROM assets WHERE id = ? AND app_id = ?", (asset_id, app_id))
     if asset is None:
         # 别的应用的资源不允许从这里删。
@@ -530,7 +527,7 @@ def banner_upload(
 ) -> RedirectResponse:
     """上传根页卡片顶部的大图。"""
     target = f"/admin/apps/{app_id}#media"
-    app = require_app(app_id)
+    app = require_app(app_id, user)
     try:
         rel_path, size, _ = storage.save_upload(
             banner, "images", config.IMAGE_EXTENSIONS, config.MAX_IMAGE_BYTES
@@ -559,7 +556,7 @@ def banner_delete(
     user: Dict[str, Any] = Depends(security.require_csrf),
 ) -> RedirectResponse:
     target = f"/admin/apps/{app_id}#media"
-    app = require_app(app_id)
+    app = require_app(app_id, user)
     if not app["banner_path"]:
         return redirect_with(target, err="当前没有封面图")
 
@@ -584,7 +581,7 @@ def share_create(
     target: str = Form("intro"),
 ) -> RedirectResponse:
     anchor = f"/admin/apps/{app_id}#share"
-    require_app(app_id)
+    require_app(app_id, user)
 
     note_value = normalize_note(note)
     target_value = target if target in analytics.SHARE_TARGETS else "intro"
@@ -615,14 +612,12 @@ def share_toggle(
     user: Dict[str, Any] = Depends(security.require_csrf),
 ) -> RedirectResponse:
     anchor = f"/admin/apps/{app_id}#share"
-    link = db.query_one("SELECT * FROM share_links WHERE id = ? AND app_id = ?", (link_id, app_id))
-    if link is None:
-        return redirect_with(anchor, err="分享链接不存在")
-
-    db.execute(
-        "UPDATE share_links SET enabled = ? WHERE id = ?", (0 if link["enabled"] else 1, link_id)
-    )
-    return redirect_with(anchor, ok="已停用，链接仍会跳转但不再归因" if link["enabled"] else "已启用")
+    require_app(app_id, user)
+    try:
+        enabled = services.toggle_share_link(app_id, user, link_id)
+    except services.ServiceError as exc:
+        return redirect_with(anchor, err=exc.message)
+    return redirect_with(anchor, ok="已启用" if enabled else "已停用，链接仍会跳转但不再归因")
 
 
 @router.post("/apps/{app_id}/share/{link_id}/delete")
@@ -632,6 +627,7 @@ def share_delete(
     user: Dict[str, Any] = Depends(security.require_csrf),
 ) -> RedirectResponse:
     anchor = f"/admin/apps/{app_id}#share"
+    require_app(app_id, user)
     link = db.query_one("SELECT * FROM share_links WHERE id = ? AND app_id = ?", (link_id, app_id))
     if link is None:
         return redirect_with(anchor, err="分享链接不存在")
@@ -658,7 +654,7 @@ def release_create(
     build: UploadFile = File(...),
 ) -> RedirectResponse:
     target = f"/admin/apps/{app_id}#releases"
-    require_app(app_id)
+    require_app(app_id, user)
 
     version_name = version_name.strip()
     if not version_name:
@@ -739,6 +735,7 @@ def release_update(
     released_at: str = Form(""),
 ) -> RedirectResponse:
     target = f"/admin/apps/{app_id}#releases"
+    require_app(app_id, user)
     release = db.query_one(
         "SELECT * FROM releases WHERE id = ? AND app_id = ?", (release_id, app_id)
     )
@@ -773,6 +770,7 @@ def release_set_latest(
     user: Dict[str, Any] = Depends(security.require_csrf),
 ) -> RedirectResponse:
     target = f"/admin/apps/{app_id}#releases"
+    require_app(app_id, user)
     release = db.query_one(
         "SELECT * FROM releases WHERE id = ? AND app_id = ?", (release_id, app_id)
     )
@@ -792,6 +790,7 @@ def release_delete(
     user: Dict[str, Any] = Depends(security.require_csrf),
 ) -> RedirectResponse:
     target = f"/admin/apps/{app_id}#releases"
+    require_app(app_id, user)
     release = db.query_one(
         "SELECT * FROM releases WHERE id = ? AND app_id = ?", (release_id, app_id)
     )
@@ -833,7 +832,7 @@ def notice_create(
     published_at: str = Form(""),
 ) -> RedirectResponse:
     target = f"/admin/apps/{app_id}#notices"
-    require_app(app_id)
+    require_app(app_id, user)
 
     title = title.strip()
     if not title:
@@ -858,6 +857,7 @@ def notice_update(
     published_at: str = Form(""),
 ) -> RedirectResponse:
     target = f"/admin/apps/{app_id}#notices"
+    require_app(app_id, user)
     notice = db.query_one(
         "SELECT * FROM notices WHERE id = ? AND app_id = ?", (notice_id, app_id)
     )
@@ -890,6 +890,7 @@ def notice_delete(
     user: Dict[str, Any] = Depends(security.require_csrf),
 ) -> RedirectResponse:
     target = f"/admin/apps/{app_id}#notices"
+    require_app(app_id, user)
     notice = db.query_one(
         "SELECT * FROM notices WHERE id = ? AND app_id = ?", (notice_id, app_id)
     )
@@ -1035,3 +1036,63 @@ def account_delete(
         db.execute_tx(conn, "DELETE FROM users WHERE id = ?", (user_id,))
 
     return redirect_with(target, ok=f"账号 {target_user['username']} 已删除")
+
+
+# ---------------------------------------------------------------- API 密钥
+
+
+@router.get("/api-keys", response_class=HTMLResponse)
+def api_keys_page(
+    request: Request, user: Dict[str, Any] = Depends(security.get_current_user)
+) -> HTMLResponse:
+    # 超管能看到所有人的密钥，便于排查；普通账号只看自己的。
+    keys = apikeys.list_all() if user["is_super"] else apikeys.list_for_user(user["id"])
+    return render(request, "api_keys.html", user=user, keys=keys, new_key=None)
+
+
+@router.post("/api-keys", response_class=HTMLResponse)
+def api_key_create(
+    request: Request,
+    user: Dict[str, Any] = Depends(security.require_csrf),
+    name: str = Form(""),
+) -> HTMLResponse:
+    """创建密钥。
+
+    这里刻意**用渲染而不是跳转**来展示明文密钥：跳转意味着把它塞进 URL，
+    会被浏览器历史、反代访问日志和 Referer 一路记录下来。代价是刷新会重复提交
+    表单（浏览器会提示），比泄露一把长期有效的凭据划算得多。
+    """
+    created = apikeys.create(user["id"], normalize_note(name))
+    keys = apikeys.list_all() if user["is_super"] else apikeys.list_for_user(user["id"])
+    return render(
+        request,
+        "api_keys.html",
+        user=user,
+        keys=keys,
+        new_key=created,
+        ok=f"密钥已创建：{created['name'] or '（未命名）'}",
+    )
+
+
+@router.post("/api-keys/{key_id}/revoke")
+def api_key_revoke(
+    key_id: int, user: Dict[str, Any] = Depends(security.require_csrf)
+) -> RedirectResponse:
+    target = "/admin/api-keys"
+    # 非超管只能动自己的密钥
+    owner_filter = apikeys.owner_filter(user)
+    if not apikeys.revoke(key_id, owner_filter):
+        return redirect_with(target, err="密钥不存在或无权操作")
+    return redirect_with(target, ok="密钥已撤销，使用它的请求会立即失败")
+
+
+@router.post("/api-keys/{key_id}/delete")
+def api_key_delete(
+    key_id: int, user: Dict[str, Any] = Depends(security.require_csrf)
+) -> RedirectResponse:
+    target = "/admin/api-keys"
+    owner_filter = apikeys.owner_filter(user)
+    if not apikeys.delete(key_id, owner_filter):
+        return redirect_with(target, err="密钥不存在或无权操作")
+    return redirect_with(target, ok="密钥已删除")
+

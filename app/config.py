@@ -83,6 +83,19 @@ CSRF_COOKIE_NAME = os.getenv("CSRF_COOKIE_NAME", "apppublisher_csrf")
 STATS_RETENTION_DAYS = _int_env("STATS_RETENTION_DAYS", 180)
 STATS_DEFAULT_RANGE_DAYS = _int_env("STATS_DEFAULT_RANGE_DAYS", 30)
 STATS_RANGE_CHOICES = (7, 30, 90, 180)
+
+
+def clamp_days(raw: object) -> int:
+    """把区间天数收敛到白名单内。
+
+    必须收敛，不能只给默认值：analytics.daily_series() 会 range(days) 逐天建桶，
+    传个 days=100000000 就能在单 worker 上把内存和 CPU 打满。
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return STATS_DEFAULT_RANGE_DAYS
+    return value if value in STATS_RANGE_CHOICES else STATS_DEFAULT_RANGE_DAYS
 # 只有反向代理已经覆写 X-Forwarded-For 时才可开启；直连时开启等于允许客户端伪造来源 IP。
 TRUST_PROXY_HEADERS = _bool_env("TRUST_PROXY_HEADERS", False)
 

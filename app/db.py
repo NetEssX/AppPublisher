@@ -40,10 +40,14 @@ CREATE TABLE IF NOT EXISTS apps (
     tagline     TEXT    NOT NULL DEFAULT '',
     intro_html  TEXT    NOT NULL DEFAULT '',
     banner_path TEXT,
+    owner_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
     enabled     INTEGER NOT NULL DEFAULT 1,
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL
 );
+
+-- owner_id 既用于 visible_apps() 的热路径过滤，也是 ON DELETE SET NULL 查找子行的依据。
+CREATE INDEX IF NOT EXISTS idx_apps_owner ON apps (owner_id, id DESC);
 
 -- 访问统计明细。刻意不存原始 IP：visitor 是加盐哈希，见 analytics.visitor_id()。
 CREATE TABLE IF NOT EXISTS events (
@@ -82,6 +86,22 @@ CREATE TABLE IF NOT EXISTS assets (
 );
 
 CREATE INDEX IF NOT EXISTS idx_assets_app ON assets (app_id, id DESC);
+
+-- API 密钥。只存哈希：key_hash 是整把密钥的 SHA-256。
+-- 这里用 SHA-256 而不是口令那套 PBKDF2，是因为密钥是 32 字节随机串、不是人选的密码，
+-- 暴力枚举不可行；而 PBKDF2 每次请求都要跑 21 万轮，做接口鉴权太慢。
+CREATE TABLE IF NOT EXISTS api_keys (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name         TEXT    NOT NULL DEFAULT '',
+    prefix       TEXT    NOT NULL DEFAULT '',
+    key_hash     TEXT    NOT NULL UNIQUE,
+    created_at   INTEGER NOT NULL,
+    last_used_at INTEGER,
+    revoked      INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys (user_id, id DESC);
 
 -- 分享链接。访问 /{slug}/s/{code} 会记一次点击并把 code 写进 Cookie，
 -- 之后该访客的介绍页访问 / 下载都会带着这个 code，用于归因。
@@ -203,6 +223,8 @@ _ADDITIVE_COLUMNS = {
     "apps": (
         ("tagline", "TEXT NOT NULL DEFAULT ''"),
         ("banner_path", "TEXT"),
+        # 归属。历史数据为 NULL，此时只有超管能管；用 scripts/claim_apps.py 认领。
+        ("owner_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL"),
     ),
     "releases": (
         ("content_type", "TEXT NOT NULL DEFAULT 'application/octet-stream'"),
@@ -237,6 +259,31 @@ def _apply_additive_columns(conn: sqlite3.Connection) -> None:
             logger.info("数据库迁移：%s 新增列 %s", table, name)
 
 
+def _verify_schema_complete(conn: sqlite3.Connection) -> None:
+    """校验「注册在 _ADDITIVE_COLUMNS 里的列」在真正建完表之后确实存在。
+
+    这套迁移有个容易踩的坑：新增列必须**同时**写进 SCHEMA（决定全新库长什么样）
+    和 _ADDITIVE_COLUMNS（决定老库怎么升上来）。漏掉前者的话，全新库根本不会有
+    这一列，而错误要等到第一次写入才以 "no such column" 的形式暴露出来 ——
+    那时已经晚了几步。这里在启动时就把问题吼出来。
+    """
+    missing = []
+    for table, columns in _ADDITIVE_COLUMNS.items():
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if not existing:
+            missing.append(f"{table}（表都不存在）")
+            continue
+        for name, _ddl in columns:
+            if name not in existing:
+                missing.append(f"{table}.{name}")
+    if missing:
+        raise RuntimeError(
+            "数据库结构不完整，缺少列：" + "、".join(missing) + "\n"
+            "这通常意味着新增列时只改了 _ADDITIVE_COLUMNS 而忘了同步 SCHEMA —— "
+            "老库升级正常，但全新安装建不出这一列。请把列补进 SCHEMA 的 CREATE TABLE。"
+        )
+
+
 def init_db() -> None:
     conn = get_conn()
     # 顺序不能变，三步各有理由：
@@ -244,10 +291,12 @@ def init_db() -> None:
     #   2) **补列必须在建索引之前**：SCHEMA 里有 CREATE INDEX ... ON events(share_code)
     #      这类语句，老库的 events 表还没有那一列，先建索引会直接
     #      "no such column" 把启动搞挂；
-    #   3) 最后跑 SCHEMA：补建缺失的表与索引（已存在的表会跳过）。
+    #   3) 跑 SCHEMA：补建缺失的表与索引（已存在的表会跳过）；
+    #   4) 自检一遍，确认 _ADDITIVE_COLUMNS 登记的列真的都建出来了。
     _check_legacy_schema(conn)
     _apply_additive_columns(conn)
     conn.executescript(SCHEMA)
+    _verify_schema_complete(conn)
 
 
 @contextmanager

@@ -11,6 +11,11 @@
         {% if app.enabled %}<span class="tag on">已上线</span>
         {% else %}<span class="tag off">已下线</span>{% endif %}
         {% if app.tagline %}<span class="muted"> · {{ app.tagline }}</span>{% endif %}
+        <br>
+        <span class="muted" style="font-size:12px">
+          归属：{% if owner %}{{ owner.display_name or owner.username }}{% else %}<strong>无（仅超管可管理）</strong>{% endif %}
+          {% if user.is_super %}· 用 <span class="mono">scripts/claim_apps.py</span> 可改{% endif %}
+        </span>
       </p>
     </div>
     <div style="display:flex;gap:8px;white-space:nowrap">

@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block title %}API 密钥 · AppPublisher{% endblock %}
+{% block body %}
+
+{% if new_key %}
+<div class="card" style="border-color:#3f6b3f">
+  <h2>密钥已创建 —— 请立即复制</h2>
+  <p class="hint">
+    <strong>这串密钥只显示这一次。</strong>库里存的是它的 SHA-256，无法再还原；
+    离开或刷新本页后就只能重新生成一把。
+  </p>
+  <input type="text" readonly value="{{ new_key.key }}" onclick="this.select()"
+         style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px"
+         autocomplete="off" spellcheck="false">
+  <p class="hint" style="margin-top:12px">
+    用法：请求头带上 <span class="mono">Authorization: Bearer &lt;密钥&gt;</span>
+    （也接受 <span class="mono">X-API-Key</span>）。完整接口清单见
+    <a href="/docs" target="_blank" rel="noopener">/docs</a>。
+  </p>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-head">
+    <div>
+      <h2>API 密钥</h2>
+      <p class="hint">
+        用密钥可以脱离网页操作接口：创建应用、改信息、传图片与发行版、发公告等。
+        密钥的权限<strong>等于你账号当前的权限</strong>：
+        普通账号的密钥只能操作自己创建的应用，超管的密钥可操作全部应用。
+      </p>
+    </div>
+  </div>
+
+  <form method="post" action="/admin/api-keys" autocomplete="off" style="margin-bottom:22px">
+    <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+    <div class="row">
+      <div style="flex:2">
+        <label>备注（这把密钥给谁用）</label>
+        <input type="text" name="name" maxlength="120" placeholder="CI 发布机 / 我的笔记本">
+      </div>
+      <div style="flex:0 0 auto;min-width:auto">
+        <button type="submit">生成密钥</button>
+      </div>
+    </div>
+  </form>
+
+  {% if keys %}
+  <table class="tight">
+    <thead>
+      <tr>
+        {% if user.is_super %}<th>归属账号</th>{% endif %}
+        <th>备注</th>
+        <th>前缀</th>
+        <th>创建时间</th>
+        <th>最近使用</th>
+        <th>状态</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in keys %}
+      <tr>
+        {% if user.is_super %}
+        <td class="mono">{{ item.username }}{% if item.display_name %}（{{ item.display_name }}）{% endif %}</td>
+        {% endif %}
+        <td>{{ item.name or '（未命名）' }}</td>
+        <td class="mono">ap_{{ item.prefix }}…</td>
+        <td class="muted">{{ item.created_at | format_time }}</td>
+        <td class="muted">{% if item.last_used_at %}{{ item.last_used_at | format_time }}{% else %}从未使用{% endif %}</td>
+        <td>
+          {% if item.revoked %}<span class="tag off">已撤销</span>
+          {% else %}<span class="tag on">启用</span>{% endif %}
+        </td>
+        <td style="text-align:right;white-space:nowrap">
+          {% if not item.revoked %}
+          <form method="post" action="/admin/api-keys/{{ item.id }}/revoke" style="display:inline"
+                onsubmit='return confirm({{ ("确认撤销密钥「" ~ (item.name or item.prefix) ~ "」？用它发起的请求会立即失败。") | tojson }})'>
+            <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+            <button class="ghost small" type="submit">撤销</button>
+          </form>
+          {% endif %}
+          <form method="post" action="/admin/api-keys/{{ item.id }}/delete" style="display:inline"
+                onsubmit='return confirm({{ ("确认删除密钥「" ~ (item.name or item.prefix) ~ "」？此操作不可撤销。") | tojson }})'>
+            <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+            <button class="danger small" type="submit">删除</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="hint" style="margin:14px 0 0">
+    「撤销」保留记录但立即失效，适合轮换；「删除」则彻底移除。
+    两者都不会影响已发布的版本或已记录的统计。
+  </p>
+  {% else %}
+  <p class="muted">还没有密钥。上面填个备注就能生成。</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>关于安全</h2>
+  <ul class="hint" style="margin:0;padding-left:20px">
+    <li>密钥等价于你的账号身份，<strong>不要提交进 Git、不要贴进聊天记录</strong>。</li>
+    <li>库里只存 SHA-256，即使数据库泄露也无法还原出密钥。</li>
+    <li>账号被删除时，其名下的密钥会一并清除。</li>
+    <li>密钥没有有效期，也没有请求频率限制 —— 建议按用途分开生成，方便单独撤销。</li>
+  </ul>
+</div>
+
+{% endblock %}

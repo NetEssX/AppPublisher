@@ -10,11 +10,16 @@ import time
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import analytics, config, db, security
+from . import analytics, config, db, security, services
 from .routers import admin as admin_routes
+from .routers import api as api_routes
 from .routers import public as public_routes
 
 logging.basicConfig(
@@ -101,6 +106,51 @@ app = FastAPI(
 #   <img src="/media/images/xxxx.png">
 app.mount("/media", StaticFiles(directory=str(config.UPLOAD_DIR)), name="media")
 
-# 后台路由必须排在前面：public 里的 /{slug} 是单段通配，先注册才不会抢走 /admin。
+@app.exception_handler(StarletteHTTPException)
+async def http_error_envelope(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    """/api/** 统一成 {"error": ...}（docs/api.md 承诺的契约）；其余路径保持 FastAPI 默认的
+    {"detail": ...}，不动公开读取接口的既有形状。
+
+    必须转发 exc.headers —— 网页后台未登录时靠 303 的 Location 头跳登录页。
+    """
+    field = "error" if request.url.path.startswith("/api/") else "detail"
+    return JSONResponse({field: exc.detail}, status_code=exc.status_code, headers=exc.headers)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_envelope(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """422 与 400 共用同一套 {"error", "details"} 信封（见 docs/api.md 的状态码表）。
+
+    status 必须写死 422：RequestValidationError 只带 errors()/body，**没有 status_code
+    属性**（FastAPI 自带的处理器同样直接写字面量）。在这里访问 exc.status_code 会抛
+    AttributeError，而异常处理器里抛异常会被 Starlette 变成 500 —— 结果就是所有参数
+    校验失败都从 422 退化成 500。
+    """
+    payload = jsonable_encoder(exc.errors())
+    if not request.url.path.startswith("/api/"):
+        return JSONResponse({"detail": payload}, status_code=422)
+
+    first = (exc.errors() or [{}])[0]
+    location = ".".join(str(part) for part in first.get("loc", []) if part != "body")
+    message = first.get("msg") or "请求参数不合法"
+    return JSONResponse(
+        {"error": f"{location}: {message}" if location else message, "details": payload},
+        status_code=422,
+    )
+
+
+@app.exception_handler(services.ServiceError)
+async def service_error_handler(request: Request, exc: services.ServiceError) -> JSONResponse:
+    """领域校验失败的统一出口。
+
+    网页后台会自己 try/except 转成提示消息，所以这条主要服务于 JSON API：
+    把 ServiceError 映射成对应的状态码 + {"error": "..."}。
+    """
+    return JSONResponse({"error": exc.message}, status_code=exc.status)
+
+
+# 路由注册顺序：admin / api 都必须排在 public 之前 ——
+# public 里的 /{slug} 与 /{slug}/s/{code} 是通配，先注册的才不会被抢。
 app.include_router(admin_routes.router)
+app.include_router(api_routes.router)
 app.include_router(public_routes.router)

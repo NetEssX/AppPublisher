@@ -261,6 +261,42 @@ python3 scripts/claim_images.py \
 >
 > 统计从升级后开始累积，历史访问无法回溯。
 
+## API 密钥与 JSON 管理接口
+
+后台「API 密钥」分页可以为自己的账号生成密钥，然后用它脱离网页操作接口：
+建应用、改信息、传图片与发行版、发公告、管分享链接、读统计。
+
+```bash
+curl -H "Authorization: Bearer ap_xxxx..." https://example.com/api/v1/me
+```
+
+- 完整接口清单与字段说明见 [`docs/api.md`](docs/api.md)（面向 AI 助手），
+  交互式文档在 `/docs`。
+- 密钥形如 `ap_` + 43 字符，**只在创建时显示一次**；库里只存它的 SHA-256。
+  这里用 SHA-256 而不是口令那套 PBKDF2，是因为密钥是 32 字节随机串、暴力枚举不可行，
+  而 PBKDF2 每次请求要跑 21 万轮，做鉴权太慢。
+- 权限**跟随创建者的账号**，账号被删时其密钥随外键级联清除。
+- 鉴权走请求头，**不需要 CSRF** —— 密钥是显式凭据，不像 Cookie 会被浏览器自动带上。
+
+### 应用归属
+
+应用现在有归属（`apps.owner_id`）：
+
+- **超管**：看得到、管得了所有应用。
+- **普通账号**：只看得到、只改得动**自己创建的**应用；碰别人的一律 404
+  （不是 403 —— 不透露「存在但不属于你」）。
+- 这条规则在**网页后台与 JSON API 上走的是同一份实现**（`app/services.py`），
+  不会出现「网页里能改、API 里不能改」。
+
+本次升级之前创建的应用归属为空，**只有超管能管**（原作者的普通账号也看不到）。
+用脚本认领：
+
+```bash
+python3 scripts/claim_apps.py                    # 预览：列出无归属的应用与可选账号
+python3 scripts/claim_apps.py --user alice --apply
+python3 scripts/claim_apps.py --app qutschedule=alice --apply
+```
+
 ## 客户端接入
 
 **接入方（尤其是让 AI 写客户端代码的场景）请直接看 [`docs/client-integration.md`](docs/client-integration.md)。**
