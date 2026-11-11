@@ -126,6 +126,7 @@ CREATE TABLE IF NOT EXISTS releases (
     description  TEXT    NOT NULL DEFAULT '',
     build_path   TEXT    NOT NULL,
     build_name   TEXT    NOT NULL DEFAULT '',
+    build_label  TEXT    NOT NULL DEFAULT '',
     build_size   INTEGER NOT NULL DEFAULT 0,
     build_sha256 TEXT    NOT NULL DEFAULT '',
     content_type TEXT    NOT NULL DEFAULT 'application/octet-stream',
@@ -138,6 +139,24 @@ CREATE TABLE IF NOT EXISTS releases (
 
 CREATE INDEX IF NOT EXISTS idx_releases_app ON releases (app_id, version_code DESC);
 CREATE INDEX IF NOT EXISTS idx_releases_latest ON releases (app_id, is_latest);
+
+-- 一个发行版的附加产物（手机包、手表包等）。**主产物仍存在 releases.build_* 里**，
+-- 这样旧库、旧下载地址和旧客户端都不需要迁移；本表只放除主产物以外的文件。
+-- 不把主产物也复制进来，是为了避免「同一个文件两份状态」的漂移。
+CREATE TABLE IF NOT EXISTS release_files (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    release_id    INTEGER NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
+    label         TEXT    NOT NULL DEFAULT '',
+    path          TEXT    NOT NULL,
+    original_name TEXT    NOT NULL DEFAULT '',
+    size          INTEGER NOT NULL DEFAULT 0,
+    sha256        TEXT    NOT NULL DEFAULT '',
+    content_type  TEXT    NOT NULL DEFAULT 'application/octet-stream',
+    position      INTEGER NOT NULL DEFAULT 0,
+    created_at    INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_release_files_release ON release_files (release_id, position, id);
 
 CREATE TABLE IF NOT EXISTS notices (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -228,6 +247,8 @@ _ADDITIVE_COLUMNS = {
     ),
     "releases": (
         ("content_type", "TEXT NOT NULL DEFAULT 'application/octet-stream'"),
+        # 主产物的展示标识（例如「手机」「手表」）。附加文件的标识在 release_files.label。
+        ("build_label", "TEXT NOT NULL DEFAULT ''"),
     ),
     "events": (
         ("share_code", "TEXT NOT NULL DEFAULT ''"),

@@ -35,7 +35,7 @@ python3 tests/smoke_test.py
 
 1. **新建应用** — 填名称（如 `QUT课表`）和短链（如 `QUTSchedule`）。
 2. **填介绍页** — 在应用详情页把 HTML 粘进文本框，或直接上传 `.html` 文件。这段 HTML 会原样输出到 `/QUTSchedule`，想怎么写就怎么写。
-3. **上传构建产物** — 填版本名（`v1.2.0`）、版本号（`26092711`）、更新说明，选择文件。首次上传会自动成为「最新版本」，之后可以手动切换。
+3. **上传构建产物** — 填版本名（`v1.2.0`）、版本号（`26092711`）、更新说明，选择一个或多个文件；多个文件时第一个是主产物，可用「文件标识」写成 `手机,手表` 区分。首次上传会自动成为「最新版本」，之后可以手动切换。
 4. **发公告** — 填标题和正文，发布时间留空即为当前时间。
 
 应用详情页底部有「接口速查」，会实时显示该应用各接口的地址，以及 `releases/latest` 和 `notices/latest` 当前的真实返回，方便对着写客户端。
@@ -58,11 +58,19 @@ python3 tests/smoke_test.py
   "appName": "QUT课表",
   "size": 8388608,
   "sha256": "9f2c...",
-  "forceUpdate": false
+  "forceUpdate": false,
+  "files": [
+    {"id": null, "label": "手机", "name": "app-phone.apk", "size": 8388608,
+     "sha256": "9f2c...", "contentType": "application/vnd.android.package-archive",
+     "primary": true, "download": "https://example.com/QUTSchedule/build/26092711"},
+    {"id": 7, "label": "手表", "name": "app-watch.apk", "size": 1048576,
+     "sha256": "1a2b...", "contentType": "application/vnd.android.package-archive",
+     "primary": false, "download": "https://example.com/QUTSchedule/build/26092711/files/7"}
+  ]
 }
 ```
 
-前 5 个字段是稳定契约；后 4 个是增量补充（`sha256` 可用于校验下载完整性，`forceUpdate` 由后台勾选）。
+前 5 个字段是稳定契约；后 5 个是增量补充（`files` 为多产物列表，单文件版本恰好一条，第一条即 `download`）。`sha256` 可用于校验下载完整性，`forceUpdate` 由后台勾选。
 
 `timestamp` 是 **epoch 毫秒**。没有发布过任何版本时返回 404。
 
@@ -87,6 +95,16 @@ EXTRA_BUILD_EXTENSIONS=.bin,.rom,.xapk
 ```
 
 追加的类型没有内置 Content-Type，会回落到 `application/octet-stream`（或 Python `mimetypes` 猜出来的值）。
+
+### `GET /{slug}/build/{versionCode}/files/{fileId}` — 下载附加产物
+
+一个版本可以携带多个文件（例如手机包 + 手表包）。`releases/latest` 的 `files` 数组按顺序给出每个文件：
+
+- `files[0]` 是**主产物**，`download` 与旧的 `/{slug}/build/{versionCode}` 完全一致；
+- 其余文件各有 `/files/{fileId}` 地址，`label` 是后台上传时填的标识（如 `手表`），可用于客户端选择。
+- 单文件版本的 `files` 恰好一条，旧客户端只读 `download` 不受影响。
+
+下载的 `Content-Type` 与文件名规则同旧接口，附加产物的文件名会带上标识（`QUTSchedule-v1.2.0-watch.apk`）。
 
 ### `GET /{slug}/notices/latest` — 最新公告
 
@@ -368,6 +386,7 @@ tests/smoke_test.py 端到端自检
 | `COOKIE_SECURE` | `0` | 生产环境跑 HTTPS 时设为 `1` |
 | `SESSION_MAX_AGE` | `604800` | 会话有效期（秒），默认 7 天 |
 | `MAX_BUILD_MB` | `1024` | 单个构建产物大小上限（旧名 `MAX_APK_MB` 仍兼容） |
+| `MAX_RELEASE_FILES` | `10` | 一个版本最多携带多少个文件（含主产物） |
 | `EXTRA_BUILD_EXTENSIONS` | 空 | 追加允许上传的扩展名，逗号分隔，如 `.bin,.rom` |
 | `MAX_IMAGE_MB` | `8` | 单张图片大小上限 |
 | `MAX_INTRO_MB` | `4` | 介绍页 HTML 大小上限 |

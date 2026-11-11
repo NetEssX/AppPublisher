@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Reque
 from pydantic import BaseModel, Field
 
 from .. import analytics, apikeys, config, db, services
-from ..serializers import notice_payload
+from ..serializers import notice_payload, release_file_entries
 from .public import base_url_for, find_latest_release, latest_releases_by_app
 
 router = APIRouter(prefix="/api/v1")
@@ -107,7 +107,28 @@ class ShareLinkCreate(BaseModel):
 # ---------------------------------------------------------------- 序列化
 
 
-def release_json(slug: str, base_url: str, row: Dict[str, Any]) -> Dict[str, Any]:
+def release_json(
+    slug: str,
+    base_url: str,
+    row: Dict[str, Any],
+    extras: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    if extras is None:
+        extras = services.release_files_for([row["id"]]).get(row["id"], [])
+    # 复用公开接口的 files 结构，只把字段名换成 snake_case，避免两套 URL 逻辑漂移。
+    files = [
+        {
+            "id": entry.get("id"),
+            "label": entry["label"],
+            "name": entry["name"],
+            "size": entry["size"],
+            "sha256": entry["sha256"],
+            "content_type": entry["contentType"],
+            "primary": entry["primary"],
+            "download_url": entry["download"],
+        }
+        for entry in release_file_entries(row, slug, base_url, extras)
+    ]
     return {
         "id": row["id"],
         "version_name": row["version_name"],
@@ -121,6 +142,8 @@ def release_json(slug: str, base_url: str, row: Dict[str, Any]) -> Dict[str, Any
         "released_at": row["released_at"],
         "created_at": row["created_at"],
         "download_url": f"{base_url}/{slug}/build/{row['version_code']}",
+        # 单文件版本恰好一条；多文件版本第一条是主产物（download_url 指向它）。
+        "files": files,
     }
 
 
@@ -357,14 +380,28 @@ def list_releases(
     app = services.find_app_by_slug(slug, actor)
     base = base_url_for(request)
     rows = _releases_of(app["id"])
-    return {"count": len(rows), "releases": [release_json(app["slug"], base, row) for row in rows]}
+    extras = services.release_files_for(row["id"] for row in rows)
+    return {
+        "count": len(rows),
+        "releases": [
+            release_json(app["slug"], base, row, extras.get(row["id"])) for row in rows
+        ],
+    }
 
 
 @router.post("/apps/{slug}/releases", status_code=201, summary="上传并发布新版本")
 def create_release(
     request: Request,
     slug: str,
-    file: UploadFile = File(..., description="构建产物，扩展名需在白名单内"),
+    file: Optional[UploadFile] = File(
+        None, description="主产物（单文件旧写法）；与 files 同时传时排在最前面"
+    ),
+    files: List[UploadFile] = File(
+        default=[], description="多个产物，第一个是主产物；手机包 + 手表包用这个字段"
+    ),
+    labels: List[str] = Form(
+        default=[], description="与文件顺序对应的标识，例如 手机、手表；可重复传或逗号分隔"
+    ),
     version_name: str = Form(...),
     version_code: int = Form(..., description="正整数，应用内唯一"),
     description: str = Form(""),
@@ -373,6 +410,11 @@ def create_release(
     released_at: Optional[int] = Form(None, description="epoch 毫秒，留空取当前时间"),
     key: Dict[str, Any] = Depends(current_key),
 ) -> Dict[str, Any]:
+    """发布新版本。
+
+    单文件继续用 `file`，行为与以前完全一致；多文件用重复的 `files` 字段，
+    第一个文件是主产物，沿用旧的 download_url。`labels` 可省略，默认取文件名。
+    """
     actor = actor_of(key)
     app = services.find_app_by_slug(slug, actor)
     result = services.create_release(
@@ -385,6 +427,8 @@ def create_release(
         make_latest=make_latest,
         released_at_ms=released_at,
         upload=file,
+        uploads=files,
+        labels=labels,
     )
     row = db.query_one("SELECT * FROM releases WHERE id = ?", (result["id"],))
     return release_json(app["slug"], base_url_for(request), row)

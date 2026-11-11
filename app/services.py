@@ -8,8 +8,10 @@
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional
 
 from fastapi import HTTPException, UploadFile
 
@@ -175,6 +177,15 @@ def delete_app(app_id: int, user: Dict[str, Any]) -> str:
         row["build_path"]
         for row in db.query_all("SELECT build_path FROM releases WHERE app_id = ?", (app_id,))
     ]
+    # 附加产物（手机包之外的手表包等）也要一并清理。
+    paths.extend(
+        row["path"]
+        for row in db.query_all(
+            "SELECT f.path FROM release_files f JOIN releases r ON r.id = f.release_id "
+            "WHERE r.app_id = ?",
+            (app_id,),
+        )
+    )
     if app["banner_path"]:
         paths.append(app["banner_path"])
     paths.extend(
@@ -280,6 +291,56 @@ def parse_version_code(raw: Any) -> int:
     return code
 
 
+def _default_file_label(filename: Optional[str], index: int) -> str:
+    """用户没写标识时，用文件名（不含扩展名）当默认标识。"""
+    stem = Path(filename or "").stem
+    return normalize_text(stem, 40) or f"文件 {index + 1}"
+
+
+def normalize_file_labels(raw: Any, count: int) -> List[str]:
+    """把「手机,手表」或重复表单字段整理成与文件顺序对应的标识列表。
+
+    没传标识时返回等长的空字符串，由 create_release 从文件名推导默认值。
+    ``raw`` 可以是 None、单个字符串或字符串列表；逗号（中英文）都当分隔符。
+    """
+    if raw is None:
+        parts: List[str] = []
+    elif isinstance(raw, str):
+        parts = [raw]
+    else:
+        parts = [str(item) for item in raw]
+
+    labels: List[str] = []
+    for item in parts:
+        labels.extend(part.strip()[:40] for part in re.split(r"[,，]", item) if part.strip())
+
+    if not labels:
+        return [""] * count
+    if len(labels) != count:
+        raise ServiceError(f"文件标识有 {len(labels)} 个，但上传了 {count} 个文件，数量必须一致")
+    return labels
+
+
+def release_files_for(release_ids: Iterable[int]) -> Dict[int, List[Dict[str, Any]]]:
+    """批量取发行版的附加产物，按 release_id 分组。
+
+    列表接口一次取完，避免每个版本再查一次库（N+1）。
+    """
+    ids = sorted({int(item) for item in release_ids})
+    if not ids:
+        return {}
+    placeholders = ",".join("?" * len(ids))
+    rows = db.query_all(
+        f"SELECT * FROM release_files WHERE release_id IN ({placeholders}) "
+        "ORDER BY release_id, position, id",
+        tuple(ids),
+    )
+    grouped: Dict[int, List[Dict[str, Any]]] = {release_id: [] for release_id in ids}
+    for row in rows:
+        grouped[row["release_id"]].append(row)
+    return grouped
+
+
 def create_release(
     app_id: int,
     user: Dict[str, Any],
@@ -290,8 +351,15 @@ def create_release(
     force_update: bool = False,
     make_latest: bool = False,
     released_at_ms: Optional[int] = None,
-    upload: UploadFile,
+    upload: Optional[UploadFile] = None,
+    uploads: Optional[List[UploadFile]] = None,
+    labels: Any = None,
 ) -> Dict[str, Any]:
+    """发布一个版本。
+
+    ``upload`` 是历史入口（单文件）；``uploads`` 可以按「主产物在前」的顺序传多个文件。
+    两者同时给时 upload 排在最前面，仍然只产生一个版本记录。
+    """
     require_app(app_id, user)
 
     version_name = (version_name or "").strip()
@@ -302,12 +370,50 @@ def create_release(
     if db.query_one("SELECT id FROM releases WHERE app_id = ? AND version_code = ?", (app_id, code)):
         raise ServiceError(f"版本号 {code} 已存在，请先删除旧记录")
 
-    # 查重必须发生在落盘之前，否则被拒的请求会留下孤儿文件。
-    rel_path, size, sha256 = _save(upload, "build", config.BUILD_EXTENSIONS, config.MAX_BUILD_BYTES)
+    candidates: List[UploadFile] = []
+    if upload is not None and upload.filename:
+        candidates.append(upload)
+    for item in uploads or []:
+        if item is not None and item.filename:
+            candidates.append(item)
+    if not candidates:
+        raise ServiceError("请选择要上传的文件")
+    if len(candidates) > config.MAX_RELEASE_FILES:
+        raise ServiceError(
+            f"一个版本最多上传 {config.MAX_RELEASE_FILES} 个文件，当前 {len(candidates)} 个"
+        )
+
+    label_list = normalize_file_labels(labels, len(candidates))
+    resolved_labels = [
+        label or _default_file_label(item.filename, index)
+        for index, (item, label) in enumerate(zip(candidates, label_list))
+    ]
+
+    # 先把所有文件落盘，再开始事务；任何一步失败都把已落盘的文件清掉，避免孤儿文件。
+    stored = []
+    try:
+        for item in candidates:
+            rel_path, size, sha256 = _save(
+                item, "build", config.BUILD_EXTENSIONS, config.MAX_BUILD_BYTES
+            )
+            stored.append(
+                {
+                    "path": rel_path,
+                    "name": storage.safe_display_name(item.filename, f"{code}.bin"),
+                    "size": size,
+                    "sha256": sha256,
+                    "content_type": storage.content_type_for(item.filename),
+                }
+            )
+    except Exception:
+        for item in stored:
+            storage.delete(item["path"])
+        raise
 
     existing = db.query_value("SELECT COUNT(*) FROM releases WHERE app_id = ?", (app_id,)) or 0
     mark_latest = bool(make_latest) or existing == 0
     timestamp = now_ms()
+    primary = stored[0]
 
     try:
         with db.transaction() as conn:
@@ -316,32 +422,77 @@ def create_release(
             release_id = db.execute_tx(
                 conn,
                 "INSERT INTO releases (app_id, version_name, version_code, description, build_path,"
-                " build_name, build_size, build_sha256, content_type, force_update, is_latest,"
-                " released_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " build_name, build_label, build_size, build_sha256, content_type, force_update,"
+                " is_latest, released_at, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     app_id,
                     version_name,
                     code,
                     description or "",
-                    rel_path,
-                    storage.safe_display_name(upload.filename, f"{code}.bin"),
-                    size,
-                    sha256,
-                    storage.content_type_for(upload.filename),
+                    primary["path"],
+                    primary["name"],
+                    resolved_labels[0],
+                    primary["size"],
+                    primary["sha256"],
+                    primary["content_type"],
                     1 if force_update else 0,
                     1 if mark_latest else 0,
                     released_at_ms if released_at_ms is not None else timestamp,
                     timestamp,
                 ),
             )
+            files = [
+                {
+                    # 主产物没有独立记录，序列化时 id 为 null；这里保持一致。
+                    "id": None,
+                    "label": resolved_labels[0],
+                    "name": primary["name"],
+                    "size": primary["size"],
+                    "sha256": primary["sha256"],
+                    "content_type": primary["content_type"],
+                    "primary": True,
+                }
+            ]
+            for position, extra in enumerate(stored[1:], start=1):
+                file_id = db.execute_tx(
+                    conn,
+                    "INSERT INTO release_files (release_id, label, path, original_name, size,"
+                    " sha256, content_type, position, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        release_id,
+                        resolved_labels[position],
+                        extra["path"],
+                        extra["name"],
+                        extra["size"],
+                        extra["sha256"],
+                        extra["content_type"],
+                        position,
+                        timestamp,
+                    ),
+                )
+                files.append(
+                    {
+                        "id": file_id,
+                        "label": resolved_labels[position],
+                        "name": extra["name"],
+                        "size": extra["size"],
+                        "sha256": extra["sha256"],
+                        "content_type": extra["content_type"],
+                        "primary": False,
+                    }
+                )
     except sqlite3.IntegrityError:
         # 查重与插入之间隔着一整次文件上传，窗口很宽（CI 重试、表单重复提交）。
         # 真正的兜底是 UNIQUE(app_id, version_code)，这属于普通校验失败，不是 500。
-        storage.delete(rel_path)
+        for item in stored:
+            storage.delete(item["path"])
         raise ServiceError(f"版本号 {code} 已存在，请先删除旧记录")
     except Exception:
-        # 入库失败就把刚落盘的产物清掉，避免留下孤儿文件。
-        storage.delete(rel_path)
+        # 入库失败就把刚落盘的文件清掉，避免留下孤儿文件。
+        for item in stored:
+            storage.delete(item["path"])
         logger.exception("写入发行版失败 app_id=%s version_code=%s", app_id, code)
         raise ServiceError("保存失败，请查看服务端日志", status=500)
 
@@ -349,9 +500,10 @@ def create_release(
         "id": release_id,
         "version_name": version_name,
         "version_code": code,
-        "size": size,
-        "sha256": sha256,
+        "size": primary["size"],
+        "sha256": primary["sha256"],
         "is_latest": mark_latest,
+        "files": files,
     }
 
 
@@ -410,6 +562,13 @@ def delete_release(app_id: int, user: Dict[str, Any], release_id: int) -> str:
     if release is None:
         raise ServiceError("发行版不存在", status=404)
 
+    extra_paths = [
+        row["path"]
+        for row in db.query_all(
+            "SELECT path FROM release_files WHERE release_id = ?", (release_id,)
+        )
+    ]
+
     # 补 latest 与删记录放进同一个事务：若先删文件再补，文件删除一失败就会留下
     # 「应用没有任何 latest」的坏状态；磁盘多一个孤儿文件则可以事后清理。
     with db.transaction() as conn:
@@ -425,11 +584,37 @@ def delete_release(app_id: int, user: Dict[str, Any], release_id: int) -> str:
                     conn, "UPDATE releases SET is_latest = 1 WHERE id = ?", (fallback["id"],)
                 )
 
-    try:
-        storage.delete(release["build_path"])
-    except OSError:
-        logger.warning("删除产物文件失败，磁盘上可能残留 %s", release["build_path"], exc_info=True)
+    for path in [release["build_path"], *extra_paths]:
+        try:
+            storage.delete(path)
+        except OSError:
+            logger.warning("删除产物文件失败，磁盘上可能残留 %s", path, exc_info=True)
     return release["version_name"]
+
+
+def delete_release_file(
+    app_id: int, user: Dict[str, Any], release_id: int, file_id: int
+) -> str:
+    """删除发行版里的一个附加产物。主产物不能单独删，只能删整个发行版。"""
+    require_app(app_id, user)
+    release = db.query_one(
+        "SELECT id FROM releases WHERE id = ? AND app_id = ?", (release_id, app_id)
+    )
+    if release is None:
+        raise ServiceError("发行版不存在", status=404)
+
+    row = db.query_one(
+        "SELECT * FROM release_files WHERE id = ? AND release_id = ?", (file_id, release_id)
+    )
+    if row is None:
+        raise ServiceError("文件不存在", status=404)
+
+    db.execute("DELETE FROM release_files WHERE id = ?", (file_id,))
+    try:
+        storage.delete(row["path"])
+    except OSError:
+        logger.warning("删除产物文件失败，磁盘上可能残留 %s", row["path"], exc_info=True)
+    return row["label"] or row["original_name"] or f"#{file_id}"
 
 
 # ---------------------------------------------------------------- 公告

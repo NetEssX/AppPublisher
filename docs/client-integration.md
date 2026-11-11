@@ -34,7 +34,8 @@
 | --- | --- | --- | --- | --- |
 | GET | `/{slug}/releases/latest` | 检查更新 | 200 JSON | 404 |
 | GET | `/{slug}/releases` | 版本列表 | 200 JSON | 404 |
-| GET | `/{slug}/build/{versionCode}` | 下载产物 | 200 文件流 | 404 / 410 |
+| GET | `/{slug}/build/{versionCode}` | 下载主产物 | 200 文件流 | 404 / 410 |
+| GET | `/{slug}/build/{versionCode}/files/{fileId}` | 下载附加产物（手表包等） | 200 文件流 | 404 / 410 |
 | GET | `/{slug}/notices/latest` | 取最新公告 | 200 JSON | 404 |
 | GET | `/{slug}/notices` | 公告列表 | 200 JSON | 404 |
 | GET | `/{slug}/notices/{id}` | 单条公告 | 200 JSON | 404 |
@@ -59,6 +60,7 @@
 | `size` | integer | 否 | 增量 | 产物体积（字节）。早期数据可能为 `0` |
 | `sha256` | string | 否（可为空串） | 增量 | 产物 SHA-256 十六进制小写。**早期数据可能为空串** |
 | `forceUpdate` | boolean | 否 | 增量 | 是否强制更新。早期数据可能缺失 |
+| `files` | array | 否（可为空数组） | 增量 | 该版本的全部产物，见 2.5。**单文件版本恰好一条**，第一条即 `download` |
 
 > **「增量」的含义**：这些字段是后加的。反序列化时必须有默认值
 > （`null` / `0` / `""` / `false`），**不能声明为不可空且无默认值**，
@@ -106,12 +108,47 @@
 > 404 是刻意设计成「宁可模糊也不泄露内部状态」的。**不要**把 404 当异常上报，
 > 也**不要**试图从响应体的 `detail` 文案里区分这两种情况——文案不是契约。
 
+### 2.5 多文件版本（手机 + 手表）
+
+一个 `versionCode` 可以对应多个产物。`files` 数组元素：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | integer \| null | 附加产物 ID；主产物为 `null` |
+| `label` | string | 后台上传时填的标识，如 `手机` / `手表`；未填时是文件名去扩展名 |
+| `name` | string | 原始文件名 |
+| `size` | integer | 字节数 |
+| `sha256` | string | 该文件的 SHA-256 |
+| `contentType` | string | MIME |
+| `primary` | boolean | 是否主产物（恰好一条为 `true`） |
+| `download` | string | **绝对 URL**，直接请求 |
+
+典型客户端（Android 手机）只需要 `download`（主产物），行为与旧版完全一致。
+需要区分设备时按 `label` 找对应条目，用该条的 `download` 下载即可；
+**不要**自己在旧 URL 后面拼 `/files/...`。
+
+```json
+"files": [
+  {"id": null, "label": "手机", "name": "app-phone.apk", "size": 8388608,
+   "sha256": "9f2c...", "contentType": "application/vnd.android.package-archive",
+   "primary": true, "download": "https://example.com/QUTSchedule/build/26092711"},
+  {"id": 7, "label": "手表", "name": "app-watch.apk", "size": 1048576,
+   "sha256": "1a2b...", "contentType": "application/vnd.android.package-archive",
+   "primary": false, "download": "https://example.com/QUTSchedule/build/26092711/files/7"}
+]
+```
+
+`files` 可能缺失（早期数据）：取不到就退回旧的 `download`，不要报错。
+
 ---
 
 ## 3. `GET /{slug}/build/{versionCode}` — 下载产物
 
 用 `releases/latest` 返回的 `download` 字段直接请求即可，
 **不要自己拼接这个 URL**（服务端可能配置了与请求域名不同的 `PUBLIC_BASE_URL`）。
+
+附加产物用 `files[i].download`（形如 `/{slug}/build/{versionCode}/files/{fileId}`），
+响应头、404/410 语义与主产物完全一致。
 
 | 响应头 | 值 | 说明 |
 | --- | --- | --- |
@@ -220,7 +257,9 @@ AI 生成的代码必须满足：
       （那会变成每次切前台都请求）。如需更克制，本地记录日期，每天一次。
 - [ ] `BASE_URL` / `SLUG` 不硬编码散落在各处，集中到一个常量对象里。
 - [ ] 反序列化严格对应字段名，注意拼写：`versionName`、`versionCode`、
-      `desc`、`timestamp`、`download`、`forceUpdate`。
+      `desc`、`timestamp`、`download`、`forceUpdate`、`files`。
+- [ ] 下载地址一律取响应里的 `download`（或 `files[i].download`），**不要自己拼接**。
+- [ ] `files` 缺失或为空时退回 `download`，不能因此崩溃。
 - [ ] 「忽略此版本」按 **`versionCode`** 记录，不要按 `versionName`。
 - [ ] 服务端已返回 `no-cache`，客户端**不要**对 `releases/latest`
       做本地 HTTP 缓存，否则会一直拿不到新版本。
@@ -247,6 +286,20 @@ data class ReleaseInfo(
     @SerialName("size") val size: Long = 0L,
     @SerialName("sha256") val sha256: String = "",
     @SerialName("forceUpdate") val forceUpdate: Boolean = false,
+    // 多文件版本；缺失时为空列表，取不到就退回上面的 download
+    @SerialName("files") val files: List<ReleaseFile> = emptyList(),
+)
+
+@Serializable
+data class ReleaseFile(
+    @SerialName("id") val id: Long? = null,
+    @SerialName("label") val label: String = "",
+    @SerialName("name") val name: String = "",
+    @SerialName("size") val size: Long = 0L,
+    @SerialName("sha256") val sha256: String = "",
+    @SerialName("contentType") val contentType: String = "",
+    @SerialName("primary") val primary: Boolean = false,
+    @SerialName("download") val download: String = "",
 )
 
 @Serializable

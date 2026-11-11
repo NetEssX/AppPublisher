@@ -12,14 +12,14 @@ import re
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from .. import analytics, apikeys, config, db, security, services, storage
-from ..serializers import notice_payload, release_payload
+from ..serializers import notice_payload, release_file_entries, release_payload
 from ..utils import format_time, human_size, now_ms, redirect_with
 from .public import (
     base_url_for,
@@ -294,6 +294,13 @@ def app_detail(
         "SELECT * FROM releases WHERE app_id = ? ORDER BY version_code DESC, id DESC",
         (app_id,),
     )
+    # 附加产物（手机包之外的手表包等）。与公开接口共用同一份组装逻辑，只把
+    # base_url 传空，得到站内相对地址，后台页直接点击即可下载。
+    extras_by_release = services.release_files_for(row["id"] for row in releases)
+    for release in releases:
+        release["files"] = release_file_entries(
+            release, app["slug"], "", extras_by_release.get(release["id"])
+        )
     notices = db.query_all(
         "SELECT * FROM notices WHERE app_id = ? ORDER BY published_at DESC, id DESC",
         (app_id,),
@@ -305,7 +312,8 @@ def app_detail(
     if latest is not None:
         latest = dict(latest)
         latest["app_name"] = app["name"]
-        preview = release_payload(latest, app["slug"], base)
+        latest_extras = services.release_files_for([latest["id"]]).get(latest["id"], [])
+        preview = release_payload(latest, app["slug"], base, latest_extras)
 
     latest_notice = find_latest_notice(app_id)
     notice_preview = notice_payload(latest_notice) if latest_notice else None
@@ -453,6 +461,15 @@ def app_delete(
     # 该应用登记过的图片也要清掉（assets 表里的行会随外键级联删除）。
     build_paths.extend(
         row["path"] for row in db.query_all("SELECT path FROM assets WHERE app_id = ?", (app_id,))
+    )
+    # 多文件发行版里除主产物之外的附件。
+    build_paths.extend(
+        row["path"]
+        for row in db.query_all(
+            "SELECT f.path FROM release_files f JOIN releases r ON r.id = f.release_id"
+            " WHERE r.app_id = ?",
+            (app_id,),
+        )
     )
     db.execute("DELETE FROM apps WHERE id = ?", (app_id,))
     # 数据库记录先删干净，再清磁盘；反之若中途失败会留下悬空记录。
@@ -651,77 +668,53 @@ def release_create(
     force_update: str = Form(""),
     make_latest: str = Form(""),
     released_at: str = Form(""),
-    build: UploadFile = File(...),
+    labels: str = Form(""),
+    build: Optional[UploadFile] = File(None),
+    builds: List[UploadFile] = File(default=[]),
 ) -> RedirectResponse:
+    """网页发布入口。
+
+    旧的单文件字段 `build` 继续接受（老脚本/老书签不用改）；新表单用 `builds`
+    多选。两者同时出现时 `build` 是主产物，保持旧下载地址不变。
+    """
     target = f"/admin/apps/{app_id}#releases"
     require_app(app_id, user)
 
-    version_name = version_name.strip()
-    if not version_name:
-        return redirect_with(target, err="版本名不能为空")
+    files: List[UploadFile] = []
+    if build is not None and build.filename:
+        files.append(build)
+    files.extend(item for item in builds if item is not None and item.filename)
+    if not files:
+        return redirect_with(target, err="请选择要上传的文件")
 
     try:
-        code = int(str(version_code).strip())
-        if code <= 0:
-            raise ValueError
-    except (TypeError, ValueError):
-        return redirect_with(target, err="版本号必须是正整数")
-
-    if db.query_one(
-        "SELECT id FROM releases WHERE app_id = ? AND version_code = ?", (app_id, code)
-    ):
-        return redirect_with(target, err=f"版本号 {code} 已存在，请先删除旧记录")
-
-    try:
-        rel_path, size, sha256 = storage.save_upload(
-            build, "build", config.BUILD_EXTENSIONS, config.MAX_BUILD_BYTES
+        result = services.create_release(
+            app_id,
+            user,
+            version_name=version_name,
+            version_code=version_code,
+            description=description,
+            force_update=bool(force_update),
+            make_latest=bool(make_latest),
+            released_at_ms=parse_local_datetime(released_at),
+            uploads=files,
+            labels=labels,
         )
-    except HTTPException as exc:
-        return redirect_with(target, err=str(exc.detail))
+    except services.ServiceError as exc:
+        return redirect_with(target, err=exc.message)
 
-    existing = db.query_value("SELECT COUNT(*) FROM releases WHERE app_id = ?", (app_id,)) or 0
-    mark_latest = bool(make_latest) or existing == 0
-    timestamp = now_ms()
-
-    try:
-        with db.transaction() as conn:
-            if mark_latest:
-                db.execute_tx(
-                    conn, "UPDATE releases SET is_latest = 0 WHERE app_id = ?", (app_id,)
-                )
-            db.execute_tx(
-                conn,
-                "INSERT INTO releases (app_id, version_name, version_code, description, build_path,"
-                " build_name, build_size, build_sha256, content_type, force_update, is_latest,"
-                " released_at, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    app_id,
-                    version_name,
-                    code,
-                    description or "",
-                    rel_path,
-                    storage.safe_display_name(build.filename, f"{code}.bin"),
-                    size,
-                    sha256,
-                    storage.content_type_for(build.filename),
-                    1 if force_update else 0,
-                    1 if mark_latest else 0,
-                    parse_local_datetime(released_at) or timestamp,
-                    timestamp,
-                ),
-            )
-    except Exception:
-        # 入库失败就把刚落盘的构建产物清掉，避免留下孤儿文件。
-        storage.delete(rel_path)
-        logger.exception("写入发行版失败 app_id=%s version_code=%s", app_id, code)
-        return redirect_with(target, err="保存失败，请查看服务端日志")
-
+    suffix = f"，共 {len(files)} 个文件" if len(files) > 1 else ""
     if released_at.strip() and parse_local_datetime(released_at) is None:
         return redirect_with(
-            target, ok=f"{version_name}（{code}）已发布，但发布时间格式无法识别，已使用当前时间"
+            target,
+            ok=f"{result['version_name']}（{result['version_code']}）已发布{suffix}，"
+            "但发布时间格式无法识别，已使用当前时间",
         )
-    return redirect_with(target, ok=f"{version_name}（{code}）已发布，{human_size(size)}")
+    return redirect_with(
+        target,
+        ok=f"{result['version_name']}（{result['version_code']}）已发布，"
+        f"{human_size(result['size'])}{suffix}",
+    )
 
 
 @router.post("/apps/{app_id}/releases/{release_id}")
@@ -799,6 +792,12 @@ def release_delete(
 
     # 补 latest 和删记录放进同一个事务：若先删文件再补，文件删除一失败就会留下
     # 「应用没有任何 latest」的坏状态；磁盘上多个孤儿文件则可以事后清理。
+    extra_paths = [
+        row["path"]
+        for row in db.query_all(
+            "SELECT path FROM release_files WHERE release_id = ?", (release_id,)
+        )
+    ]
     with db.transaction() as conn:
         db.execute_tx(conn, "DELETE FROM releases WHERE id = ?", (release_id,))
         if release["is_latest"]:
@@ -812,12 +811,30 @@ def release_delete(
                     conn, "UPDATE releases SET is_latest = 1 WHERE id = ?", (fallback["id"],)
                 )
 
-    try:
-        storage.delete(release["build_path"])
-    except OSError:
-        logger.warning("删除产物文件失败，磁盘上可能残留 %s", release["build_path"], exc_info=True)
+    for path in [release["build_path"], *extra_paths]:
+        try:
+            storage.delete(path)
+        except OSError:
+            logger.warning("删除产物文件失败，磁盘上可能残留 %s", path, exc_info=True)
 
     return redirect_with(target, ok=f"已删除 {release['version_name']}")
+
+
+@router.post("/apps/{app_id}/releases/{release_id}/files/{file_id}/delete")
+def release_file_delete(
+    app_id: int,
+    release_id: int,
+    file_id: int,
+    user: Dict[str, Any] = Depends(security.require_csrf),
+) -> RedirectResponse:
+    """删除某个发行版附带的单个文件；主产物只能随整个版本一起删。"""
+    target = f"/admin/apps/{app_id}#releases"
+    require_app(app_id, user)
+    try:
+        label = services.delete_release_file(app_id, user, release_id, file_id)
+    except services.ServiceError as exc:
+        return redirect_with(target, err=exc.message)
+    return redirect_with(target, ok=f"已删除文件「{label}」")
 
 
 # ---------------------------------------------------------------- 公告

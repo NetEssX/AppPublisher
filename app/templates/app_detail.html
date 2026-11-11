@@ -216,8 +216,11 @@
       <label>更新说明</label>
       <textarea name="description" rows="4" placeholder="本次更新内容…"></textarea>
 
-      <label>构建产物文件</label>
-      <input type="file" name="build" accept="{{ accept_extensions }}" required>
+      <label>构建产物文件（可多选，第一个是主产物）</label>
+      <input type="file" name="builds" accept="{{ accept_extensions }}" multiple required>
+      <label style="margin-top:10px">文件标识（可选，逗号分隔，按上传顺序对应）</label>
+      <input type="text" name="labels" placeholder="手机,手表">
+      <p class="hint">手机包 + 手表包一起上传时填「手机,手表」；留空则用文件名作为标识。旧的单文件上传脚本仍可只传一个文件，接口不变。</p>
 
       <label style="display:flex;align-items:center;gap:8px;margin-top:14px">
         <input type="checkbox" name="make_latest" value="1" checked> 设为最新版本
@@ -243,6 +246,26 @@
             {{ release.version_name }}
             {% if release.description %}<div class="muted" style="font-size:12px">{{ release.description }}</div>{% endif %}
             <div class="mono muted">sha256 {{ release.build_sha256[:16] }}…</div>
+            {% if release.files %}
+            <div class="muted" style="font-size:12px;margin-top:6px">
+              {% for f in release.files %}
+              <div style="margin-top:2px">
+                {% if f.primary %}<span class="tag info">主</span>{% endif %}
+                <a class="mono" href="{{ f.download }}">{{ f.label }}</a>
+                <span class="muted">{{ f.size | human_size }}</span>
+                {% if not f.primary %}
+                <form method="post"
+                      action="/admin/apps/{{ app.id }}/releases/{{ release.id }}/files/{{ f.id }}/delete"
+                      style="display:inline"
+                      onsubmit='return confirm({{ ("确认删除文件 " ~ f.label ~ "？") | tojson }})'>
+                  <input type="hidden" name="csrf_token" value="{{ user.csrf_token }}">
+                  <button class="ghost small" type="submit">删除</button>
+                </form>
+                {% endif %}
+              </div>
+              {% endfor %}
+            </div>
+            {% endif %}
           </td>
           <td class="mono">{{ release.version_code }}</td>
           <td>{{ release.build_size | human_size }}</td>
@@ -307,7 +330,8 @@
     <table style="margin-bottom:16px">
       <tr><td class="mono">GET {{ base_url }}/{{ app.slug }}/releases/latest</td><td class="muted">最新版本 JSON</td></tr>
       <tr><td class="mono">GET {{ base_url }}/{{ app.slug }}/releases</td><td class="muted">所有版本列表</td></tr>
-      <tr><td class="mono">GET {{ base_url }}/{{ app.slug }}/build/{versionCode}</td><td class="muted">下载构建产物</td></tr>
+      <tr><td class="mono">GET {{ base_url }}/{{ app.slug }}/build/{versionCode}</td><td class="muted">下载主产物（旧接口，不变）</td></tr>
+      <tr><td class="mono">GET {{ base_url }}/{{ app.slug }}/build/{versionCode}/files/{fileId}</td><td class="muted">下载附加文件（手表包等）</td></tr>
       <tr><td class="mono">GET {{ base_url }}/{{ app.slug }}/notices/latest</td><td class="muted">最新公告 JSON</td></tr>
       <tr><td class="mono">GET {{ base_url }}/{{ app.slug }}/notices</td><td class="muted">公告列表</td></tr>
     </table>

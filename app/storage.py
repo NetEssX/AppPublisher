@@ -122,10 +122,14 @@ def safe_display_name(filename: Optional[str], fallback: str) -> str:
     return cleaned or fallback
 
 
-def download_filename(slug: str, version_name: str, original_name: Optional[str]) -> str:
+def download_filename(
+    slug: str, version_name: str, original_name: Optional[str], label: str = ""
+) -> str:
     """下载时使用的文件名，完全由服务端生成，不采信客户端输入。
 
     扩展名跟随上传的原始文件，所以 zip 分发的还是 .zip，apk 分发的还是 .apk。
+    label 只有附加产物会传（例如「手表」），用来区分同一版本里的多个同名安装包；
+    主产物不传，保持历史文件名不变。
     """
     extension = match_extension(
         original_name or "", config.BUILD_EXTENSIONS
@@ -136,6 +140,9 @@ def download_filename(slug: str, version_name: str, original_name: Optional[str]
 
     safe_version = _UNSAFE_NAME_RE.sub("_", (version_name or "").strip()).strip("._") or "release"
     safe_slug = _UNSAFE_NAME_RE.sub("_", (slug or "").strip()).strip("._") or "app"
+    safe_label = _UNSAFE_NAME_RE.sub("_", (label or "").strip()).strip("._")[:40]
+    if safe_label:
+        return f"{safe_slug}-{safe_version}-{safe_label}{extension}"
     return f"{safe_slug}-{safe_version}{extension}"
 
 

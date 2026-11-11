@@ -1602,6 +1602,14 @@ def main() -> int:
             files={"file": ("api.apk", APK_BYTES, "application/octet-stream")},
         )
         check("API 上传发行版返回 201", rel.status_code == 201, f"{rel.status_code} {rel.text[:160]}")
+        rel_json = rel.json()
+        check(
+            "单文件版本 files 恰好一条且等价于旧 download",
+            len(rel_json.get("files", [])) == 1
+            and rel_json["files"][0]["download_url"] == rel_json["download_url"]
+            and rel_json["files"][0]["primary"] is True,
+            rel.text[:200],
+        )
         check("公开接口能读到刚发的版本", admin.get("/ApiMade/releases/latest").status_code == 200)
 
         img = admin.post(
@@ -1702,6 +1710,120 @@ def main() -> int:
             )
             == 1,
         )
+
+        # ---- 多文件发行版（手机 + 手表）----
+        WATCH_BYTES = b"PK\x03\x04watch-package-bytes"
+        multi = admin.post(
+            f"/admin/apps/{api_app['id']}/releases",
+            data={
+                "csrf_token": csrf_of(admin, f"/admin/apps/{api_app['id']}"),
+                "version_name": "v2.0.0",
+                "version_code": "1000002",
+                "description": "手机与手表",
+                "labels": "phone,watch",
+                "make_latest": "1",
+            },
+            files=[
+                ("builds", ("phone.apk", APK_BYTES, "application/octet-stream")),
+                ("builds", ("watch.apk", WATCH_BYTES, "application/octet-stream")),
+            ],
+            follow_redirects=False,
+        )
+        check(
+            "网页后台可一次上传多个产物",
+            multi.status_code == 303 and "ok=" in multi.headers.get("location", ""),
+            multi.headers.get("location", ""),
+        )
+        multi_latest = admin.get("/ApiMade/releases/latest").json()
+        check("多文件版本 files 返回两条", len(multi_latest.get("files", [])) == 2, str(multi_latest))
+        check(
+            "标识按上传顺序写入",
+            [item["label"] for item in multi_latest["files"]] == ["phone", "watch"],
+            str(multi_latest.get("files")),
+        )
+        check(
+            "主产物下载地址仍是旧接口",
+            multi_latest["files"][0]["download"]
+            == f"https://example.com/ApiMade/build/1000002",
+            str(multi_latest["files"][0]),
+        )
+        check(
+            "附加产物有独立下载地址",
+            "/build/1000002/files/" in multi_latest["files"][1]["download"],
+            str(multi_latest["files"][1]),
+        )
+        primary_dl = admin.get("/ApiMade/build/1000002")
+        check("主产物仍是第一个文件", primary_dl.content == APK_BYTES)
+        watch_dl = admin.get(multi_latest["files"][1]["download"].replace("https://example.com", ""))
+        check("附加产物可下载", watch_dl.status_code == 200 and watch_dl.content == WATCH_BYTES)
+        check(
+            "附加产物文件名带标识",
+            "-watch.apk" in watch_dl.headers.get("content-disposition", ""),
+            watch_dl.headers.get("content-disposition", ""),
+        )
+        listed = admin.get("/ApiMade/releases").json()
+        check(
+            "版本列表里也带 files",
+            all("files" in row for row in listed["releases"]),
+            str(listed)[:200],
+        )
+
+        # ---- API 多文件上传 ----
+        admin.post(
+            "/api/v1/apps",
+            headers=hdr,
+            json={"slug": "MultiMade", "name": "多文件应用"},
+        )
+        api_multi = admin.post(
+            "/api/v1/apps/MultiMade/releases",
+            headers=hdr,
+            data={
+                "version_name": "v1.0.0",
+                "version_code": "1",
+                "labels": ["phone", "watch"],
+            },
+            files=[
+                ("files", ("phone.apk", APK_BYTES, "application/octet-stream")),
+                ("files", ("watch.apk", WATCH_BYTES, "application/octet-stream")),
+            ],
+        )
+        check("API 可用 files 字段多文件上传", api_multi.status_code == 201, api_multi.text[:200])
+        api_multi_json = api_multi.json()
+        check("API 多文件返回 files", len(api_multi_json.get("files", [])) == 2)
+        check(
+            "API 单文件旧字段 download_url 不变",
+            api_multi_json["download_url"] == api_multi_json["files"][0]["download_url"],
+        )
+        api_watch = api_multi_json["files"][1]
+        check(
+            "API 附加文件下载可用",
+            admin.get(api_watch["download_url"].replace("https://example.com", "")).content
+            == WATCH_BYTES,
+        )
+        no_file = admin.post(
+            "/api/v1/apps/MultiMade/releases",
+            headers=hdr,
+            data={"version_name": "v1.0.1", "version_code": "2"},
+        )
+        check("一个文件都不传时返回 400", no_file.status_code == 400, no_file.text[:160])
+
+        # 删除附加文件：主产物保留，版本仍可用
+        watch_id = api_watch["id"]
+        removed = admin.post(
+            f"/admin/apps/{api_app['id']}/releases/"
+            f"{apidb.query_one('SELECT id FROM releases WHERE app_id = ? AND version_code = 1000002', (api_app['id'],))['id']}"
+            f"/files/{multi_latest['files'][1]['id']}/delete",
+            data={"csrf_token": csrf_of(admin, f"/admin/apps/{api_app['id']}")},
+            follow_redirects=False,
+        )
+        check(
+            "可单独删除附加产物",
+            removed.status_code == 303 and "ok=" in removed.headers.get("location", ""),
+            removed.headers.get("location", ""),
+        )
+        after_delete = admin.get("/ApiMade/releases/latest").json()
+        check("删除后 files 只剩主产物", len(after_delete["files"]) == 1)
+        check("删除附加产物不影响主产物", admin.get("/ApiMade/build/1000002").status_code == 200)
 
         # 422 回归：RequestValidationError 没有 status_code 属性，
         # 处理器里写 exc.status_code 会抛 AttributeError → 变成 500。

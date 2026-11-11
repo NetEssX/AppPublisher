@@ -56,7 +56,7 @@ curl -H "Authorization: Bearer $APPPUBLISHER_KEY" "$APPPUBLISHER_URL/api/v1/me"
 
 - **本接口统一 snake_case**；公开读取接口（`/{slug}/releases/latest`）是 camelCase。这是刻意的两套 API，不要混淆。
 - 时间戳一律 **epoch 毫秒**（13 位）。
-- 上传用 `multipart/form-data`，文件字段名统一叫 `file`。
+- 上传用 `multipart/form-data`。单文件仍用 `file` 字段（老脚本不用改）；需要一次传多个产物时改用可重复的 `files` 字段，第一个是主产物。
 - 错误响应：`{"error": "人类可读的原因"}`，配对应状态码。
 - **写接口没有 CSRF、也不需要 Cookie** —— 密钥是显式凭据，不像 Cookie 会被浏览器自动带上。
 
@@ -120,7 +120,7 @@ curl -X DELETE "$BASE/api/v1/apps/QUTSchedule" -H "Authorization: Bearer $K"
 
 ## 4. 发行版
 
-上传产物是 multipart，字段名 `file`：
+上传产物是 multipart。单文件继续用 `file`（行为与旧版完全一致）：
 
 ```bash
 curl -X POST "$BASE/api/v1/apps/QUTSchedule/releases" \
@@ -133,15 +133,55 @@ curl -X POST "$BASE/api/v1/apps/QUTSchedule/releases" \
   -F "make_latest=true"
 ```
 
+一次上传多个产物（例如手机包 + 手表包）用可重复的 `files`，可再配 `labels`：
+
+```bash
+curl -X POST "$BASE/api/v1/apps/QUTSchedule/releases" \
+  -H "Authorization: Bearer $K" \
+  -F "files=@app-phone.apk" \
+  -F "files=@app-watch.apk" \
+  -F "labels=phone" \
+  -F "labels=watch" \
+  -F "version_name=v1.2.0" \
+  -F "version_code=26092711" \
+  -F "make_latest=true"
+```
+
 | 字段 | 说明 |
 | --- | --- |
-| `file` | 必填。扩展名必须在白名单内（`.apk .aab .ipa .exe .dmg .zip .7z .tar.gz …`，可用 `EXTRA_BUILD_EXTENSIONS` 扩充） |
+| `file` | 单文件主产物。可省略；与 `files` 同时传时排在最前面，仍占旧下载地址 |
+| `files` | 可重复。多文件上传；**第一个成为主产物**（旧的 `download_url` 指向它） |
 | `version_name` | 必填，展示用 |
 | `version_code` | 必填，**正整数，应用内唯一**；重复会返回 400 |
 | `description` | 更新说明 |
 | `force_update` | 客户端据此决定是否强制更新 |
 | `make_latest` | 默认 `true`；**首个版本无论如何都会成为 latest** |
 | `released_at` | epoch 毫秒，留空取当前时间 |
+| `labels` | 可重复或逗号分隔，与文件顺序一一对应；留空取文件名。数量与文件数不一致会返回 400 |
+
+扩展名必须在白名单内（`.apk .aab .ipa .exe .dmg .zip .7z .tar.gz …`，可用 `EXTRA_BUILD_EXTENSIONS` 扩充），单次最多 `MAX_RELEASE_FILES`（默认 10）个文件。
+
+响应在原有字段之外新增 `files` 数组，**原有字段一个都不少**，`download_url` 仍指向主产物：
+
+```json
+{
+  "id": 12,
+  "version_name": "v1.2.0",
+  "version_code": 26092711,
+  "size": 8388608,
+  "download_url": "https://example.com/QUTSchedule/build/26092711",
+  "files": [
+    {"id": null, "label": "phone", "name": "app-phone.apk", "size": 8388608,
+     "sha256": "9f2c...", "content_type": "application/vnd.android.package-archive",
+     "primary": true, "download_url": "https://example.com/QUTSchedule/build/26092711"},
+    {"id": 7, "label": "watch", "name": "app-watch.apk", "size": 1048576,
+     "sha256": "1a2b...", "content_type": "application/vnd.android.package-archive",
+     "primary": false, "download_url": "https://example.com/QUTSchedule/build/26092711/files/7"}
+  ]
+}
+```
+
+单文件版本的 `files` 恰好一条，且 `files[0].download_url == download_url`；只读旧字段的脚本行为不变。
 
 其余操作：
 
@@ -245,6 +285,8 @@ curl --fail-with-body -sS -X POST \
 curl --fail-with-body -sS "$APPPUBLISHER_URL/$SLUG/releases/latest"
 ```
 
+多文件（手机 + 手表）把上面的 `-F "file=@..."` 换成多条 `-F "files=@..."`，再按顺序补 `-F "labels=..."` 即可；返回里的 `files` 会列出每个产物的独立下载地址。
+
 ---
 
 ## 10. AI 最容易写错的点
@@ -256,6 +298,6 @@ curl --fail-with-body -sS "$APPPUBLISHER_URL/$SLUG/releases/latest"
 5. **PATCH 时传了不想改的字段** —— PATCH 覆盖传入的字段，没传的才保持原值。
 6. **改 `slug`** —— 会让已发布客户端里写死的地址失效，除非用户明确要求。
 7. **把密钥写进代码** —— 从环境变量读。
-8. **上传时字段名写错** —— 文件字段统一叫 `file`（不是 `upload` / `apk` / `banner`）。
+8. **上传时字段名写错** —— 单文件叫 `file`，多文件叫可重复的 `files`（都不是 `upload` / `apk` / `banner`）。
 9. **忘了 `-F` 用 multipart** —— 带文件的接口不能用 `-d` JSON。
 10. **`Content-Type` 冲突** —— `curl -F` 会自动设 multipart，不要再手动设 `application/json`。

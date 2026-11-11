@@ -107,6 +107,9 @@ MAX_IMAGE_MB = _int_env("MAX_IMAGE_MB", 8)
 MAX_IMAGE_BYTES = MAX_IMAGE_MB * 1024 * 1024
 MAX_INTRO_MB = _int_env("MAX_INTRO_MB", 4)
 MAX_INTRO_BYTES = MAX_INTRO_MB * 1024 * 1024
+# 一个发行版最多携带几个产物文件（手机包 + 手表包 + 其它渠道）。
+# 第一个文件是主产物，沿用旧的 /build/{versionCode} 下载地址；其余文件各有独立地址。
+MAX_RELEASE_FILES = max(1, _int_env("MAX_RELEASE_FILES", 10))
 
 # 允许分发的产物类型 -> 下载时返回的 Content-Type。
 # 这里是「能上传什么」的唯一定义处；EXTRA_BUILD_EXTENSIONS 可以往里加。

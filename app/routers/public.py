@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.templating import Jinja2Templates
 from starlette.responses import HTMLResponse
 
-from .. import analytics, config, db, storage
+from .. import analytics, config, db, services, storage
 from ..serializers import (
     notice_list_payload,
     notice_payload,
@@ -251,7 +251,8 @@ def releases_latest(request: Request, slug: str) -> JSONResponse:
         raise HTTPException(status_code=404, detail="该应用还没有发布任何版本")
     release["app_name"] = app["name"]
     analytics.record(request, app["id"], analytics.KIND_UPDATE_CHECK)
-    payload = release_payload(release, app["slug"], base_url_for(request))
+    extras = services.release_files_for([release["id"]]).get(release["id"], [])
+    payload = release_payload(release, app["slug"], base_url_for(request), extras)
     return JSONResponse(payload, headers=_NO_CACHE)
 
 
@@ -265,8 +266,9 @@ def releases_list(request: Request, slug: str) -> JSONResponse:
     )
     for row in rows:
         row["app_name"] = app["name"]
+    extras = services.release_files_for(row["id"] for row in rows)
     return JSONResponse(
-        release_list_payload(rows, app["slug"], base_url_for(request), _LIST_LIMIT),
+        release_list_payload(rows, app["slug"], base_url_for(request), _LIST_LIMIT, extras),
         headers=_NO_CACHE,
     )
 
@@ -301,6 +303,55 @@ def release_build(request: Request, slug: str, version_code: int) -> FileRespons
         media_type=release["content_type"] or _FALLBACK_MEDIA_TYPE,
         filename=storage.download_filename(
             app["slug"], release["version_name"], release["build_name"]
+        ),
+        headers=_NO_CACHE,
+    )
+
+
+@router.get("/{slug}/build/{version_code}/files/{file_id}")
+def release_extra_file(
+    request: Request, slug: str, version_code: int, file_id: int
+) -> FileResponse:
+    """下载同一版本里的附加产物（手机包之外的手表包等）。
+
+    主产物仍然走 /build/{version_code}，旧链接和旧脚本完全不受影响。
+    """
+    app = load_enabled_app(slug)
+    release = db.query_one(
+        "SELECT * FROM releases WHERE app_id = ? AND version_code = ?",
+        (app["id"], version_code),
+    )
+    if release is None:
+        raise HTTPException(status_code=404, detail="版本不存在")
+
+    row = db.query_one(
+        "SELECT * FROM release_files WHERE id = ? AND release_id = ?",
+        (file_id, release["id"]),
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    path = storage.resolve(row["path"])
+    if path is None:
+        logger.error(
+            "附加产物缺失: slug=%s version_code=%s file_id=%s path=%s",
+            slug,
+            version_code,
+            file_id,
+            row["path"],
+        )
+        raise HTTPException(status_code=410, detail="安装包已不可用，请联系开发者")
+
+    analytics.record(request, app["id"], analytics.KIND_DOWNLOAD, release["id"])
+
+    return FileResponse(
+        path,
+        media_type=row["content_type"] or _FALLBACK_MEDIA_TYPE,
+        filename=storage.download_filename(
+            app["slug"],
+            release["version_name"],
+            row["original_name"],
+            row["label"] or f"file{row['id']}",
         ),
         headers=_NO_CACHE,
     )
