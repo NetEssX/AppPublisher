@@ -3,7 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>应用列表</title>
+<title>NetEssX 应用市场</title>
+<meta name="description" content="发现好用的应用，随时获取最新版本。">
+<link rel="icon" type="image/png" href="/static/logo.png">
 <script>
 /* 主题在样式解析前就定好，避免首帧闪白/闪黑。
    默认跟随系统；用户手动选过 light/dark 之后就不再被系统切换覆盖。
@@ -55,8 +57,11 @@
     --text: #14171f;
     --muted: #6b7280;
     --accent: #2563eb;
+    --accent-2: #7c3aed;
     --accent-fg: #ffffff;
     --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 8px 24px rgba(16, 24, 40, .06);
+    --shadow-lg: 0 2px 4px rgba(16, 24, 40, .05), 0 24px 60px rgba(16, 24, 40, .14);
+    --scrim: rgba(8, 12, 20, .88);
   }
   :root[data-theme="dark"] {
     color-scheme: dark;
@@ -67,12 +72,18 @@
     --text: #e7eaf1;
     --muted: #98a1b3;
     --accent: #3b82f6;
+    --accent-2: #a78bfa;
     --accent-fg: #ffffff;
     --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 12px 32px rgba(0, 0, 0, .35);
+    --shadow-lg: 0 2px 6px rgba(0, 0, 0, .45), 0 28px 70px rgba(0, 0, 0, .55);
+    --scrim: rgba(4, 7, 12, .9);
   }
 
   * { box-sizing: border-box; }
-  html { -webkit-text-size-adjust: 100%; }
+  /* .card 自己设了 display:flex，会盖掉浏览器默认的 [hidden]{display:none}，
+     搜索过滤时必须显式兜底，否则 hidden 的卡片仍然显示。 */
+  [hidden] { display: none !important; }
+  html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; scroll-padding-top: 82px; }
   body {
     margin: 0;
     background: var(--bg);
@@ -83,17 +94,40 @@
     transition: background-color .18s ease, color .18s ease;
   }
   a { color: inherit; text-decoration: none; }
+  button, input { font: inherit; }
+  img { max-width: 100%; }
 
-  .wrap { max-width: 1120px; margin: 0 auto; padding: 40px 20px 72px; }
+  .shell { max-width: 1180px; margin: 0 auto; padding: 0 22px; }
 
-  .hero { display: flex; align-items: flex-end; gap: 16px; margin-bottom: 28px; }
-  .hero h1 { margin: 0; font-size: 28px; letter-spacing: -.02em; }
-  .hero .sub { margin: 4px 0 0; color: var(--muted); font-size: 14px; }
-  .hero .spacer { flex: 1; }
+  /* ---------------------------------------------------------------- 顶栏 */
+  .topbar {
+    position: sticky; top: 0; z-index: 30;
+    background: var(--bg);
+    background: color-mix(in srgb, var(--bg) 84%, transparent);
+    border-bottom: 1px solid var(--border);
+    backdrop-filter: saturate(150%) blur(14px);
+    -webkit-backdrop-filter: saturate(150%) blur(14px);
+  }
+  .topbar-inner { display: flex; align-items: center; gap: 22px; min-height: 66px; }
+  .brand { display: inline-flex; align-items: center; gap: 11px; font-weight: 700; letter-spacing: -.02em; }
+  .brand-mark {
+    display: block; width: 40px; height: 40px; border-radius: 12px;
+    background: #fff; object-fit: contain;
+    box-shadow: 0 4px 14px rgba(15, 23, 42, .16);
+  }
+  .brand-text { display: flex; flex-direction: column; line-height: 1.1; }
+  .brand-text small { color: var(--muted); font-size: 11px; font-weight: 500; letter-spacing: .14em; margin-top: 3px; }
+  .nav { display: flex; align-items: center; gap: 4px; }
+  .nav a {
+    padding: 7px 12px; border-radius: 999px; font-size: 13.5px; color: var(--muted);
+    transition: color .15s ease, background-color .15s ease;
+  }
+  .nav a:hover { color: var(--text); background: var(--surface-2); }
+  .topbar .spacer { flex: 1; }
 
   .theme-toggle {
     display: inline-flex; align-items: center; gap: 8px;
-    padding: 8px 14px; font: inherit; font-size: 13px; cursor: pointer;
+    padding: 8px 14px; font-size: 13px; cursor: pointer;
     background: var(--surface); color: var(--text);
     border: 1px solid var(--border); border-radius: 999px;
     transition: border-color .15s ease, background-color .15s ease;
@@ -106,12 +140,241 @@
   [data-mode="light"] .theme-toggle .tt-label::after { content: '浅色'; }
   [data-mode="dark"] .theme-toggle .tt-label::after { content: '深色'; }
 
-  .grid {
-    list-style: none; margin: 0; padding: 0;
-    display: grid; gap: 22px;
-    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  }
+  main { padding: 30px 0 72px; }
 
+  /* ---------------------------------------------------------------- 轮播 */
+  .showcase {
+    position: relative; overflow: hidden; border-radius: 24px;
+    background: var(--scrim); box-shadow: var(--shadow-lg);
+    isolation: isolate;
+  }
+  .showcase-track { position: relative; min-height: clamp(410px, 46vw, 510px); }
+  .showcase-slide {
+    position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: flex-end;
+    opacity: 0; visibility: hidden; transform: scale(1.025);
+    transition: opacity .65s ease, transform .9s ease, visibility .65s;
+  }
+  .showcase-slide.is-active { opacity: 1; visibility: visible; transform: none; z-index: 1; }
+  .showcase:focus-visible { outline: 2px solid rgba(255, 255, 255, .72); outline-offset: 3px; }
+
+  .showcase-media { position: absolute; inset: 0; display: block; }
+  .showcase-media img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .showcase-fallback {
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(120% 120% at 18% 12%, rgba(255, 255, 255, .28), transparent 55%),
+      linear-gradient(135deg,
+        hsl(calc(var(--accent-h, 220) * 1deg), 70%, 56%),
+        hsl(calc((var(--accent-h, 220) + 46) * 1deg), 66%, 38%));
+    display: flex; align-items: center; justify-content: center;
+  }
+  .showcase-fallback .placeholder {
+    font-size: clamp(120px, 24vw, 260px); font-weight: 800; line-height: 1;
+    color: rgba(255, 255, 255, .2); letter-spacing: -.04em; user-select: none;
+  }
+  .showcase-scrim {
+    position: absolute; inset: 0;
+    background:
+      linear-gradient(90deg, var(--scrim) 0%, rgba(8, 12, 20, .62) 46%, rgba(8, 12, 20, .06) 100%),
+      linear-gradient(0deg, rgba(8, 12, 20, .72) 0%, rgba(8, 12, 20, .12) 52%, rgba(8, 12, 20, .05) 100%);
+  }
+  .showcase-copy {
+    position: relative; z-index: 2; color: #fff;
+    /* 宽度按容器算，不能用 padding-right 百分比：百分比是相对轮播容器，
+       在宽屏上会把正文挤成一条窄柱子，按钮也被迫换行。 */
+    width: min(700px, 64%);
+    max-width: 760px;
+    padding: clamp(26px, 5vw, 54px);
+  }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    margin: 0 0 14px; font-size: 12.5px; font-weight: 600; letter-spacing: .12em;
+    text-transform: uppercase; color: rgba(255, 255, 255, .78);
+  }
+  .eyebrow .dot {
+    width: 7px; height: 7px; border-radius: 50%; background: #4ade80;
+    box-shadow: 0 0 0 4px rgba(74, 222, 128, .18);
+  }
+  .showcase-copy h2 {
+    margin: 0; font-size: clamp(28px, 4.4vw, 46px); line-height: 1.12;
+    letter-spacing: -.03em; text-shadow: 0 2px 24px rgba(0, 0, 0, .35);
+  }
+  .showcase-copy h2 a:hover { text-decoration: underline; text-underline-offset: 6px; }
+  .showcase-tagline {
+    margin: 14px 0 0; max-width: 560px; color: rgba(255, 255, 255, .82);
+    font-size: clamp(13.5px, 1.5vw, 16px);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .showcase-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 20px; font-size: 12.5px; color: rgba(255, 255, 255, .78); }
+  .showcase-meta .pill {
+    padding: 4px 11px; border-radius: 999px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: rgba(255, 255, 255, .14); border: 1px solid rgba(255, 255, 255, .22); color: #fff;
+  }
+  .showcase-actions { display: flex; flex-wrap: wrap; gap: 11px; margin-top: 26px; }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+    padding: 10px 18px; border-radius: 11px; font-size: 13.5px; font-weight: 600;
+    border: 1px solid var(--border); color: var(--text); background: var(--surface);
+    cursor: pointer; transition: transform .15s ease, border-color .15s ease, color .15s ease, filter .15s ease;
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); transform: translateY(-1px); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); box-shadow: 0 8px 22px rgba(37, 99, 235, .28); }
+  .btn.primary:hover { color: var(--accent-fg); filter: brightness(1.08); }
+  .btn.glass {
+    background: rgba(255, 255, 255, .12); border-color: rgba(255, 255, 255, .34);
+    color: #fff; backdrop-filter: blur(6px);
+  }
+  .btn.glass:hover { background: rgba(255, 255, 255, .2); border-color: rgba(255, 255, 255, .6); color: #fff; }
+  .btn.small { padding: 7px 13px; font-size: 12.5px; border-radius: 9px; }
+
+  .showcase-side {
+    position: absolute; z-index: 2; right: clamp(22px, 4vw, 46px); top: clamp(20px, 3vw, 34px);
+    color: rgba(255, 255, 255, .86); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    display: flex; align-items: baseline; gap: 6px; letter-spacing: .06em;
+  }
+  .showcase-index { font-size: 30px; font-weight: 700; }
+  .showcase-total { font-size: 12px; color: rgba(255, 255, 255, .55); }
+
+  .showcase-controls {
+    position: absolute; z-index: 3; right: clamp(18px, 3.4vw, 34px); bottom: clamp(18px, 3vw, 30px);
+    display: flex; align-items: center; gap: 14px;
+  }
+  .car-dots { display: flex; align-items: center; gap: 6px; }
+  .car-dot {
+    width: 8px; height: 8px; padding: 0; border: 0; border-radius: 999px; cursor: pointer;
+    background: rgba(255, 255, 255, .38);
+    transition: width .25s ease, background-color .25s ease;
+  }
+  .car-dot.is-active { width: 26px; background: #fff; }
+  .car-btn {
+    width: 38px; height: 38px; padding: 0; border-radius: 50%; cursor: pointer;
+    display: grid; place-items: center;
+    color: #fff; background: rgba(255, 255, 255, .14);
+    border: 1px solid rgba(255, 255, 255, .3); backdrop-filter: blur(8px);
+    transition: background-color .15s ease, transform .15s ease;
+  }
+  .car-btn:hover { background: rgba(255, 255, 255, .26); transform: scale(1.05); }
+  .car-btn svg { width: 16px; height: 16px; display: block; }
+
+  /* ---------------------------------------------------------------- 数据条 */
+  .stats {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    margin-top: 20px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 18px; box-shadow: var(--shadow); overflow: hidden;
+  }
+  .stat { padding: 17px 22px; display: flex; align-items: baseline; gap: 10px; }
+  .stat + .stat { border-left: 1px solid var(--border); }
+  .stat strong { font-size: 23px; letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--muted); font-size: 12.5px; }
+
+  /* ---------------------------------------------------------------- 分区 */
+  .section { margin-top: 54px; }
+  .section-head {
+    display: flex; align-items: flex-end; gap: 18px; margin-bottom: 20px;
+  }
+  .section-head h2 { margin: 0; font-size: 22px; letter-spacing: -.02em; }
+  .section-head p { margin: 3px 0 0; color: var(--muted); font-size: 13px; }
+  .section-head .spacer { flex: 1; }
+  .section-head .jump { color: var(--accent); font-size: 13px; font-weight: 600; white-space: nowrap; }
+  .section-head .jump:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+  /* 最近更新：桌面横向排列，可滚动，不换行 */
+  .rail {
+    list-style: none; margin: 0; padding: 2px 2px 12px;
+    display: grid; grid-auto-flow: column; grid-auto-columns: minmax(268px, 292px);
+    gap: 18px; overflow-x: auto; scroll-snap-type: x mandatory;
+    scrollbar-width: thin;
+  }
+  .update-card {
+    scroll-snap-align: start; display: flex; flex-direction: column; overflow: hidden;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+    box-shadow: var(--shadow); transition: transform .18s ease, border-color .18s ease;
+  }
+  .update-card:hover { transform: translateY(-2px); border-color: var(--accent); }
+  .update-thumb {
+    position: relative; display: block; aspect-ratio: 16 / 9; overflow: hidden;
+    background: linear-gradient(135deg,
+      hsl(calc(var(--accent-h, 220) * 1deg), 68%, 56%),
+      hsl(calc((var(--accent-h, 220) + 42) * 1deg), 66%, 44%));
+  }
+  .update-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .update-thumb .placeholder {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    font-size: 44px; font-weight: 700; color: rgba(255, 255, 255, .9);
+    text-shadow: 0 2px 12px rgba(0, 0, 0, .25);
+  }
+  .badge-new {
+    position: absolute; left: 12px; top: 12px;
+    padding: 3px 9px; border-radius: 999px;
+    background: rgba(255, 255, 255, .92); color: #0f172a;
+    font-size: 10.5px; font-weight: 800; letter-spacing: .1em;
+  }
+  .update-body { display: flex; flex-direction: column; flex: 1; padding: 14px 16px 16px; }
+  .update-title { display: flex; align-items: center; gap: 8px; }
+  .update-title h3 { margin: 0; font-size: 15.5px; letter-spacing: -.01em; }
+  .update-title h3 a:hover { color: var(--accent); }
+  .chip {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    background: var(--surface-2); border: 1px solid var(--border);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11px; color: var(--muted); white-space: nowrap;
+  }
+  .update-desc {
+    margin: 8px 0 0; color: var(--muted); font-size: 12.5px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    min-height: 2.9em;
+  }
+  .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; font-size: 12px; color: var(--muted); }
+  .update-actions { display: flex; gap: 9px; margin-top: auto; padding-top: 14px; }
+  .update-actions .btn { flex: 1; }
+
+  /* 热门：排行榜 */
+  .rank-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+  .rank-item {
+    display: flex; align-items: center; gap: 14px; min-width: 0;
+    padding: 13px 16px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 15px; box-shadow: var(--shadow);
+    transition: border-color .15s ease, transform .15s ease;
+  }
+  .rank-item:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .rank-no {
+    width: 30px; flex: none; text-align: center;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 15px; font-weight: 700; color: var(--muted);
+  }
+  .rank-item:nth-child(1) .rank-no { color: #f59e0b; }
+  .rank-item:nth-child(2) .rank-no { color: #94a3b8; }
+  .rank-item:nth-child(3) .rank-no { color: #b45309; }
+  .rank-thumb {
+    width: 54px; height: 54px; flex: none; border-radius: 13px; overflow: hidden;
+    display: block; background: linear-gradient(135deg,
+      hsl(calc(var(--accent-h, 220) * 1deg), 68%, 56%),
+      hsl(calc((var(--accent-h, 220) + 42) * 1deg), 66%, 44%));
+  }
+  .rank-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .rank-thumb .placeholder { display: flex; width: 100%; height: 100%; align-items: center; justify-content: center; color: rgba(255, 255, 255, .92); font-weight: 700; font-size: 20px; }
+  .rank-main { min-width: 0; flex: 1; }
+  .rank-main h3 { margin: 0; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rank-main h3 a:hover { color: var(--accent); }
+  .rank-main p { margin: 2px 0 0; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rank-stat { flex: none; text-align: right; }
+  .rank-stat strong { display: block; font-size: 15px; font-variant-numeric: tabular-nums; }
+  .rank-stat span { color: var(--muted); font-size: 10.5px; }
+
+  /* 全部应用 */
+  .search {
+    display: flex; align-items: center; gap: 9px;
+    width: min(300px, 100%); padding: 9px 13px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 11px;
+    transition: border-color .15s ease, box-shadow .15s ease;
+  }
+  .search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37, 99, 235, .14); }
+  .search svg { width: 16px; height: 16px; flex: none; color: var(--muted); }
+  .search input { width: 100%; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 13.5px; }
+  .search input::placeholder { color: var(--muted); }
+
+  .grid { list-style: none; margin: 0; padding: 0; display: grid; gap: 20px; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); }
   .card {
     display: flex; flex-direction: column; overflow: hidden;
     background: var(--surface); border: 1px solid var(--border);
@@ -119,7 +382,6 @@
     transition: transform .18s ease, border-color .18s ease;
   }
   .card:hover { transform: translateY(-2px); border-color: var(--accent); }
-
   .card-media {
     position: relative; display: block; aspect-ratio: 16 / 9; overflow: hidden;
     background: linear-gradient(135deg,
@@ -128,109 +390,411 @@
   }
   .card-media img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .card-media .placeholder {
-    position: absolute; inset: 0;
-    display: flex; align-items: center; justify-content: center;
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
     font-size: 52px; font-weight: 600; color: rgba(255, 255, 255, .92);
     text-shadow: 0 2px 12px rgba(0, 0, 0, .25);
   }
-
-  .card-body { display: flex; flex-direction: column; flex: 1; padding: 18px 20px 20px; }
+  .card-body { display: flex; flex-direction: column; flex: 1; padding: 17px 19px 19px; }
   .card-body h2 { margin: 0; font-size: 17px; letter-spacing: -.01em; }
   .card-body h2 a:hover { color: var(--accent); }
   .tagline {
-    margin: 8px 0 0; color: var(--muted); font-size: 13.5px;
-    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-    overflow: hidden;
+    margin: 7px 0 0; color: var(--muted); font-size: 13.5px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
   }
-
-  .meta { display: flex; align-items: center; gap: 10px; margin-top: 14px; font-size: 12.5px; flex-wrap: wrap; }
-  .chip {
-    display: inline-block; padding: 3px 10px; border-radius: 999px;
-    background: var(--surface-2); border: 1px solid var(--border);
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 12px;
-  }
-  .muted { color: var(--muted); }
-
+  .card .meta { margin-top: 12px; }
   .actions { display: flex; gap: 10px; margin-top: auto; padding-top: 16px; }
-  .btn {
-    flex: 1; text-align: center; padding: 9px 14px; border-radius: 10px;
-    font-size: 13.5px; border: 1px solid var(--border); color: var(--text);
-    transition: border-color .15s ease, color .15s ease;
-  }
-  .btn:hover { border-color: var(--accent); color: var(--accent); }
-  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
-  .btn.primary:hover { filter: brightness(1.1); color: var(--accent-fg); }
+  .actions .btn { flex: 1; }
 
   .empty {
-    padding: 72px 24px; text-align: center; color: var(--muted);
+    padding: 64px 24px; text-align: center; color: var(--muted);
     background: var(--surface); border: 1px dashed var(--border); border-radius: 16px;
   }
+  .empty strong { display: block; color: var(--text); font-size: 17px; margin-bottom: 4px; }
 
-  footer { margin-top: 48px; text-align: center; color: var(--muted); font-size: 12.5px; }
+  footer { margin-top: 54px; padding-top: 22px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12.5px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  footer .spacer { flex: 1; }
+  footer a:hover { color: var(--accent); }
 
-  @media (max-width: 560px) {
-    .wrap { padding: 24px 14px 56px; }
-    .hero { flex-wrap: wrap; }
-    .hero h1 { font-size: 23px; }
+  @media (max-width: 900px) {
+    .nav { display: none; }
+    .showcase-copy { padding-right: clamp(26px, 5vw, 54px); }
+    .showcase-side { display: none; }
+    .rank-list { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (max-width: 720px) {
+    .shell { padding: 0 16px; }
+    main { padding-top: 22px; }
+    .topbar-inner { min-height: 60px; gap: 12px; }
+    .theme-toggle .tt-label { display: none; }
+    .theme-toggle { padding: 8px 11px; }
+    .showcase { border-radius: 18px; }
+    .showcase-track { min-height: 440px; }
+    .showcase-copy { width: 100%; max-width: none; padding: 26px 22px 74px; }
+    .showcase-copy h2 { font-size: 29px; }
+    .showcase-controls { left: 22px; right: auto; bottom: 20px; }
+    .stats { grid-template-columns: 1fr; }
+    .stat + .stat { border-left: 0; border-top: 1px solid var(--border); }
+    .stat { padding: 12px 18px; }
+    .section { margin-top: 40px; }
+    .section-head { flex-wrap: wrap; gap: 12px; }
+    .section-head .search { width: 100%; }
+    .rail { grid-auto-columns: minmax(250px, 84vw); }
+    .rank-list { grid-template-columns: minmax(0, 1fr); }
+    .rank-item { gap: 10px; padding: 11px 12px; }
+    /* 手机宽度放不下「序号 + 封面 + 文案 + 下载数 + 下载按钮」，
+       优先保留文案和下载数，按钮和说明文字收起，避免整行把页面撑宽。 */
+    .rank-item .btn { display: none; }
+    .rank-stat span { display: none; }
     .grid { grid-template-columns: 1fr; gap: 16px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    .showcase-slide, .card, .update-card, .rank-item, .btn, .car-btn { transition: none !important; }
   }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <header class="hero">
-    <div>
-      <h1>欢迎使用NetEssX为您带来的丰富软件生态</h1>
-      <p class="sub">共 {{ total }} 个已上线应用</p>
-    </div>
-    <div class="spacer"></div>
+<header class="topbar">
+  <div class="shell topbar-inner">
+    <a class="brand" href="/" aria-label="NetEssX 应用市场首页">
+      <img class="brand-mark" src="/static/logo.png" alt="" width="40" height="40" decoding="async">
+      <span class="brand-text">NetEssX<small>应用市场</small></span>
+    </a>
+    <nav class="nav" aria-label="页面导航">
+      {% if featured %}<a href="#featured">推荐</a>{% endif %}
+      {% if recent %}<a href="#recent">最近更新</a>{% endif %}
+      {% if popular %}<a href="#popular">热门</a>{% endif %}
+      <a href="#all">全部应用</a>
+    </nav>
+    <span class="spacer"></span>
     <button class="theme-toggle" type="button" title="切换主题（跟随系统 / 浅色 / 深色）"
             onclick="window.appPublisherCycleTheme()">
       <span class="tt-icon" aria-hidden="true"></span>
       <span class="tt-label"></span>
     </button>
-  </header>
+  </div>
+</header>
 
-  {% if cards %}
-  <ul class="grid">
-    {% for card in cards %}
-    <li class="card">
-      <a class="card-media" href="/{{ card.slug }}" style="--accent-h: {{ card.accent }}"
-         aria-label="查看 {{ card.name }}">
-        {% if card.banner_url %}
-        <img src="{{ card.banner_url }}" alt="{{ card.name }} 封面图" loading="lazy">
-        {% else %}
-        <span class="placeholder" aria-hidden="true">{{ card.initial }}</span>
-        {% endif %}
-      </a>
-      <div class="card-body">
-        <h2><a href="/{{ card.slug }}">{{ card.name }}</a></h2>
-        {% if card.tagline %}<p class="tagline">{{ card.tagline }}</p>{% endif %}
-        <div class="meta">
-          {% if card.latest_version %}
-          <span class="chip">{{ card.latest_version }}</span>
-          {% if card.size %}<span class="muted">{{ card.size | human_size }}</span>{% endif %}
-          <span class="muted">{{ card.released_at | format_time }}</span>
+<main class="shell">
+  {% if featured %}
+  <section class="showcase" id="featured" aria-roledescription="轮播" aria-label="最近更新的应用推荐"
+           data-carousel tabindex="0">
+    <div class="showcase-track">
+      {% for item in featured %}
+      <article class="showcase-slide{% if loop.first %} is-active{% endif %}"
+               data-slide role="group" aria-roledescription="幻灯片"
+               aria-label="第 {{ loop.index }} 个，共 {{ featured|length }} 个：{{ item.name }}"
+               aria-hidden="{{ 'false' if loop.first else 'true' }}"
+               {{ '' if loop.first else 'inert' }}>
+        <a class="showcase-media" href="/{{ item.slug }}" tabindex="-1" aria-hidden="true">
+          {% if item.banner_url %}
+          <img src="{{ item.banner_url }}" alt="" loading="{{ 'eager' if loop.first else 'lazy' }}" decoding="async">
           {% else %}
-          <span class="muted">暂未发布版本</span>
+          <span class="showcase-fallback" style="--accent-h: {{ item.accent }}">
+            <span class="placeholder">{{ item.initial }}</span>
+          </span>
           {% endif %}
+        </a>
+        <div class="showcase-scrim" aria-hidden="true"></div>
+        <div class="showcase-copy">
+          <p class="eyebrow"><span class="dot" aria-hidden="true"></span>最近更新</p>
+          <h2><a href="/{{ item.slug }}">{{ item.name }}</a></h2>
+          {% if item.tagline %}<p class="showcase-tagline">{{ item.tagline }}</p>{% endif %}
+          <div class="showcase-meta">
+            <span class="pill">{{ item.latest_version }}</span>
+            <span>{{ item.size | human_size }}</span>
+            {% if item.file_count > 1 %}<span>{{ item.file_count }} 个文件</span>{% endif %}
+            <span>{{ item.released_at | relative_time }}</span>
+          </div>
+          <div class="showcase-actions">
+            <a class="btn primary" href="/{{ item.slug }}">查看详情</a>
+            <a class="btn glass" href="/{{ item.slug }}/build/{{ item.latest_code }}">下载最新版</a>
+          </div>
         </div>
-        <div class="actions">
-          <a class="btn" href="/{{ card.slug }}">查看介绍</a>
-          {% if card.latest_code %}
-          <a class="btn primary" href="/{{ card.slug }}/build/{{ card.latest_code }}">下载最新版</a>
-          {% endif %}
+        <div class="showcase-side" aria-hidden="true">
+          <span class="showcase-index">{{ "%02d" | format(loop.index) }}</span>
+          <span class="showcase-total">/ {{ "%02d" | format(featured|length) }}</span>
         </div>
+      </article>
+      {% endfor %}
+    </div>
+    {% if featured|length > 1 %}
+    <div class="showcase-controls">
+      <div class="car-dots" role="tablist" aria-label="选择推荐应用">
+        {% for item in featured %}
+        <button class="car-dot{% if loop.first %} is-active{% endif %}" type="button"
+                role="tab" data-car-dot="{{ loop.index0 }}"
+                aria-selected="{{ 'true' if loop.first else 'false' }}"
+                aria-label="第 {{ loop.index }} 个：{{ item.name }}"></button>
+        {% endfor %}
       </div>
-    </li>
-    {% endfor %}
-  </ul>
-  {% else %}
-  <div class="empty">还没有已上线的应用。</div>
+      <button class="car-btn" type="button" data-car-prev aria-label="上一个应用">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>
+      </button>
+      <button class="car-btn" type="button" data-car-next aria-label="下一个应用">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+      </button>
+    </div>
+    {% endif %}
+  </section>
   {% endif %}
 
-  <footer>Powered by <a href="https://github.com/NetEssX/AppPublisher" target="_blank">NetEssX/AppPublisher</a></footer>
-</div>
+  <section class="stats" aria-label="站点概览">
+    <div class="stat"><strong>{{ total }}</strong><span>个已上线应用</span></div>
+    <div class="stat"><strong>{{ release_total }}</strong><span>个发行版本</span></div>
+    <div class="stat"><strong>{{ downloads_30d }}</strong><span>近 30 天下载</span></div>
+  </section>
+
+  {% if recent %}
+  <section class="section" id="recent">
+    <div class="section-head">
+      <div>
+        <h2>最近更新</h2>
+        <p>刚刚发布新版本的应用，按发布时间排序</p>
+      </div>
+      <span class="spacer"></span>
+      <a class="jump" href="#all">全部应用 →</a>
+    </div>
+    <ul class="rail">
+      {% for card in recent %}
+      <li class="update-card">
+        <a class="update-thumb" href="/{{ card.slug }}" style="--accent-h: {{ card.accent }}"
+           aria-label="查看 {{ card.name }}">
+          {% if card.banner_url %}
+          <img src="{{ card.banner_url }}" alt="{{ card.name }} 封面图" loading="lazy" decoding="async">
+          {% else %}
+          <span class="placeholder" aria-hidden="true">{{ card.initial }}</span>
+          {% endif %}
+          {% if card.is_new %}<span class="badge-new">NEW</span>{% endif %}
+        </a>
+        <div class="update-body">
+          <div class="update-title">
+            <h3><a href="/{{ card.slug }}">{{ card.name }}</a></h3>
+            <span class="chip">{{ card.latest_version }}</span>
+          </div>
+          <p class="update-desc">{{ card.description or card.tagline or '这个应用还没有填写简介。' }}</p>
+          <div class="meta">
+            <span>{{ card.released_at | relative_time }}</span>
+            <span>{{ card.size | human_size }}</span>
+            {% if card.file_count > 1 %}<span>{{ card.file_count }} 个文件</span>{% endif %}
+          </div>
+          <div class="update-actions">
+            <a class="btn small" href="/{{ card.slug }}">详情</a>
+            <a class="btn small primary" href="/{{ card.slug }}/build/{{ card.latest_code }}">下载</a>
+          </div>
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+
+  {% if popular %}
+  <section class="section" id="popular">
+    <div class="section-head">
+      <div>
+        <h2>热门下载</h2>
+        <p>近 30 天下载次数最多的应用</p>
+      </div>
+    </div>
+    <ol class="rank-list">
+      {% for card in popular %}
+      <li class="rank-item">
+        <span class="rank-no">{{ "%02d" | format(loop.index) }}</span>
+        <a class="rank-thumb" href="/{{ card.slug }}" style="--accent-h: {{ card.accent }}"
+           aria-label="查看 {{ card.name }}">
+          {% if card.banner_url %}
+          <img src="{{ card.banner_url }}" alt="" loading="lazy" decoding="async">
+          {% else %}
+          <span class="placeholder" aria-hidden="true">{{ card.initial }}</span>
+          {% endif %}
+        </a>
+        <div class="rank-main">
+          <h3><a href="/{{ card.slug }}">{{ card.name }}</a></h3>
+          <p>{{ card.tagline or card.latest_version }}</p>
+        </div>
+        <div class="rank-stat">
+          <strong>{{ card.downloads }}</strong>
+          <span>近 30 天下载</span>
+        </div>
+        <a class="btn small" href="/{{ card.slug }}/build/{{ card.latest_code }}">下载</a>
+      </li>
+      {% endfor %}
+    </ol>
+  </section>
+  {% endif %}
+
+  <section class="section" id="all">
+    <div class="section-head">
+      <div>
+        <h2>全部应用</h2>
+        <p>{{ total }} 个已上线应用</p>
+      </div>
+      <span class="spacer"></span>
+      <label class="search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+        <input id="app-search" type="search" placeholder="搜索应用、简介或短链…" autocomplete="off"
+               aria-label="搜索应用">
+      </label>
+    </div>
+
+    {% if cards %}
+    <ul class="grid" id="app-grid">
+      {% for card in cards %}
+      <li class="card" data-search="{{ (card.name ~ ' ' ~ card.tagline ~ ' ' ~ card.slug) | lower }}">
+        <a class="card-media" href="/{{ card.slug }}" style="--accent-h: {{ card.accent }}"
+           aria-label="查看 {{ card.name }}">
+          {% if card.banner_url %}
+          <img src="{{ card.banner_url }}" alt="{{ card.name }} 封面图" loading="lazy" decoding="async">
+          {% else %}
+          <span class="placeholder" aria-hidden="true">{{ card.initial }}</span>
+          {% endif %}
+          {% if card.is_new %}<span class="badge-new">NEW</span>{% endif %}
+        </a>
+        <div class="card-body">
+          <h2><a href="/{{ card.slug }}">{{ card.name }}</a></h2>
+          {% if card.tagline %}<p class="tagline">{{ card.tagline }}</p>{% endif %}
+          <div class="meta">
+            {% if card.latest_version %}
+            <span class="chip">{{ card.latest_version }}</span>
+            {% if card.size %}<span>{{ card.size | human_size }}</span>{% endif %}
+            <span>{{ card.released_at | relative_time }}</span>
+            {% if card.file_count > 1 %}<span>{{ card.file_count }} 个文件</span>{% endif %}
+            {% else %}
+            <span>暂未发布版本</span>
+            {% endif %}
+          </div>
+          <div class="actions">
+            <a class="btn" href="/{{ card.slug }}">查看介绍</a>
+            {% if card.latest_code %}
+            <a class="btn primary" href="/{{ card.slug }}/build/{{ card.latest_code }}">下载最新版</a>
+            {% endif %}
+          </div>
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+    <p class="empty" id="search-empty" hidden><strong>没有找到匹配的应用</strong>换个关键词试试，或清空搜索查看全部 {{ total }} 个应用。</p>
+    {% else %}
+    <div class="empty"><strong>还没有已上线的应用</strong>管理员在后台发布应用后，这里会自动出现。</div>
+    {% endif %}
+  </section>
+
+  <footer>
+    <span>Powered by <a href="https://github.com/NetEssX/AppPublisher" target="_blank" rel="noopener">NetEssX/AppPublisher</a></span>
+    <span class="spacer"></span>
+    <span>共 {{ total }} 个应用 · {{ release_total }} 个版本</span>
+  </footer>
+</main>
+
+<script>
+(function () {
+  /* ---------------------------------------------------------------- 轮播 */
+  var carousel = document.querySelector('[data-carousel]');
+  if (carousel) {
+    var slides = Array.prototype.slice.call(carousel.querySelectorAll('[data-slide]'));
+    var dots = Array.prototype.slice.call(document.querySelectorAll('[data-car-dot]'));
+    var prevBtn = carousel.querySelector('[data-car-prev]');
+    var nextBtn = carousel.querySelector('[data-car-next]');
+    var reduceMotion = window.matchMedia
+      ? window.matchMedia('(prefers-reduced-motion: reduce)')
+      : { matches: false, addEventListener: null };
+    var index = 0;
+    var timer = null;
+    var paused = false;
+    var AUTOPLAY_MS = 6500;
+
+    function show(next) {
+      if (!slides.length) return;
+      index = (next % slides.length + slides.length) % slides.length;
+      slides.forEach(function (slide, i) {
+        var active = i === index;
+        slide.classList.toggle('is-active', active);
+        slide.setAttribute('aria-hidden', active ? 'false' : 'true');
+        if ('inert' in slide) { slide.inert = !active; }
+      });
+      dots.forEach(function (dot, i) {
+        var active = i === index;
+        dot.classList.toggle('is-active', active);
+        dot.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
+    }
+
+    function stop() {
+      if (timer !== null) { window.clearInterval(timer); timer = null; }
+    }
+
+    function start() {
+      stop();
+      if (slides.length < 2 || reduceMotion.matches) return;
+      timer = window.setInterval(function () {
+        if (!paused && !document.hidden) { show(index + 1); }
+      }, AUTOPLAY_MS);
+    }
+
+    function go(next) { show(next); start(); }
+
+    if (prevBtn) prevBtn.addEventListener('click', function () { go(index - 1); });
+    if (nextBtn) nextBtn.addEventListener('click', function () { go(index + 1); });
+    dots.forEach(function (dot) {
+      dot.addEventListener('click', function () {
+        go(parseInt(dot.getAttribute('data-car-dot'), 10) || 0);
+      });
+    });
+
+    carousel.addEventListener('mouseenter', function () { paused = true; });
+    carousel.addEventListener('mouseleave', function () { paused = false; });
+    carousel.addEventListener('focusin', function () { paused = true; });
+    carousel.addEventListener('focusout', function (event) {
+      if (!carousel.contains(event.relatedTarget)) { paused = false; }
+    });
+    carousel.addEventListener('keydown', function (event) {
+      if (event.key === 'ArrowLeft') { event.preventDefault(); go(index - 1); }
+      if (event.key === 'ArrowRight') { event.preventDefault(); go(index + 1); }
+    });
+
+    // 触屏左右滑动；竖滑交给页面滚动，不抢手势。
+    var touchX = null;
+    var touchY = null;
+    carousel.addEventListener('pointerdown', function (event) {
+      if (event.pointerType === 'mouse') return;
+      touchX = event.clientX; touchY = event.clientY;
+    });
+    carousel.addEventListener('pointerup', function (event) {
+      if (touchX === null) return;
+      var dx = event.clientX - touchX;
+      var dy = event.clientY - touchY;
+      touchX = null;
+      if (Math.abs(dx) > 45 && Math.abs(dx) > Math.abs(dy)) {
+        go(dx < 0 ? index + 1 : index - 1);
+      }
+    });
+    carousel.addEventListener('pointercancel', function () { touchX = null; });
+
+    if (reduceMotion.addEventListener) {
+      reduceMotion.addEventListener('change', function () { start(); });
+    }
+    start();
+  }
+
+  /* ---------------------------------------------------------------- 搜索 */
+  var input = document.getElementById('app-search');
+  var grid = document.getElementById('app-grid');
+  if (input && grid) {
+    var items = Array.prototype.slice.call(grid.querySelectorAll('[data-search]'));
+    var empty = document.getElementById('search-empty');
+    input.addEventListener('input', function () {
+      var query = input.value.trim().toLowerCase();
+      var shown = 0;
+      items.forEach(function (item) {
+        var hit = !query || (item.getAttribute('data-search') || '').indexOf(query) !== -1;
+        item.hidden = !hit;
+        if (hit) shown += 1;
+      });
+      if (empty) empty.hidden = shown !== 0;
+    });
+  }
+})();
+</script>
 </body>
 </html>

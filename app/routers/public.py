@@ -25,7 +25,7 @@ from ..serializers import (
     release_list_payload,
     release_payload,
 )
-from ..utils import escape, format_time, human_size
+from ..utils import escape, format_time, human_size, now_ms, relative_time
 
 logger = logging.getLogger("apppublisher.public")
 
@@ -33,11 +33,18 @@ router = APIRouter()
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent.parent / "templates"))
 templates.env.filters["human_size"] = human_size
 templates.env.filters["format_time"] = format_time
+templates.env.filters["relative_time"] = relative_time
 
 _FALLBACK_MEDIA_TYPE = "application/octet-stream"
 _NO_CACHE = {"Cache-Control": "no-cache, no-store, must-revalidate"}
 # 列表接口的返回上限。客户端只需要最近的若干条，不设上限会随着发布次数增长把响应撑爆。
 _LIST_LIMIT = 100
+# 首页版式：轮播取最近发布新版本的 5 个应用，下面再各取一段做「最近更新」「热门下载」。
+_FEATURED_LIMIT = 5
+_RECENT_LIMIT = 8
+_POPULAR_LIMIT = 4
+# 「NEW」角标的时效：7 天内的发行版才算新。
+_NEW_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 
 
 # ---------------------------------------------------------------- 内部工具
@@ -80,8 +87,9 @@ def latest_releases_by_app() -> Dict[int, Dict[str, Any]]:
     """
     result: Dict[int, Dict[str, Any]] = {}
     for row in db.query_all(
-        "SELECT id, app_id, version_name, version_code, is_latest, released_at, build_size "
-        "FROM releases ORDER BY app_id, is_latest DESC, version_code DESC, id DESC"
+        "SELECT id, app_id, version_name, version_code, is_latest, released_at, build_size,"
+        " description FROM releases"
+        " ORDER BY app_id, is_latest DESC, version_code DESC, id DESC"
     ):
         result.setdefault(row["app_id"], row)
     return result
@@ -134,20 +142,55 @@ def _accent_for(slug: str) -> int:
     return int(digest[:8], 16) % 360
 
 
+def _extra_file_counts(release_ids: Any) -> Dict[int, int]:
+    """{release_id: 附加产物数量} —— 主产物之外还有几个文件。
+
+    首页只需要知道「是不是多文件版本」，用一条 IN 查询批量取，避免按应用逐条查。
+    """
+    ids = sorted({int(item) for item in release_ids if item is not None})
+    if not ids:
+        return {}
+    marks = ",".join("?" * len(ids))
+    return {
+        row["release_id"]: int(row["extras"] or 0)
+        for row in db.query_all(
+            f"SELECT release_id, COUNT(*) AS extras FROM release_files "
+            f"WHERE release_id IN ({marks}) GROUP BY release_id",
+            tuple(ids),
+        )
+    }
+
+
 @router.get("/", response_class=HTMLResponse)
 def site_index(request: Request) -> HTMLResponse:
-    """站点根页：卡片式列出所有已上线的应用。"""
+    """站点首页：应用市场的推荐布局。
+
+    数据分四块，全部一次查完：
+    - featured：最近发布新版本的 N 个应用，做轮播；
+    - recent：同一批应用按发布时间倒序，做「最近更新」横滑卡片；
+    - popular：近 30 天下载最多的应用（没有下载数据时整段隐藏）；
+    - cards：全部已上线应用，前端搜索过滤。
+    """
     # 只取卡片要用的列：intro_html 可能有几 MB，SELECT * 会把每个应用的整页 HTML
-    # 都读进内存，而根页一个字节都用不到。
+    # 都读进内存，而首页一个字节都用不到。
     apps = db.query_all(
         "SELECT id, slug, name, tagline, banner_path FROM apps "
         "WHERE enabled = 1 ORDER BY name COLLATE NOCASE"
     )
     latest_by_app = latest_releases_by_app()
+    totals = analytics.app_totals_map(config.STATS_DEFAULT_RANGE_DAYS)
+    extra_counts = _extra_file_counts(
+        latest["id"] for latest in latest_by_app.values() if latest is not None
+    )
+    now = now_ms()
 
     cards = []
     for app in apps:
         latest = latest_by_app.get(app["id"])
+        downloads = (
+            totals.get(app["id"], {}).get(analytics.KIND_DOWNLOAD, {}).get("pv", 0)
+        )
+        extras = extra_counts.get(latest["id"], 0) if latest else 0
         cards.append(
             {
                 "slug": app["slug"],
@@ -159,21 +202,63 @@ def site_index(request: Request) -> HTMLResponse:
                 "latest_version": latest["version_name"] if latest else "",
                 "latest_code": latest["version_code"] if latest else None,
                 "released_at": latest["released_at"] if latest else None,
+                "description": (latest["description"] or "") if latest else "",
                 "size": latest["build_size"] if latest else 0,
+                "file_count": (1 + extras) if latest else 0,
+                "downloads": downloads,
+                "is_new": bool(
+                    latest
+                    and latest["released_at"]
+                    and now - latest["released_at"] <= _NEW_WINDOW_MS
+                ),
             }
         )
+
+    # 只有「有发行版」的应用才参与推荐/最近更新/热门；没有版本的应用仍进全部列表。
+    with_release = [card for card in cards if card["latest_code"]]
+    by_release_time = sorted(
+        with_release,
+        key=lambda card: (card["released_at"] or 0, card["latest_code"] or 0),
+        reverse=True,
+    )
+    featured = by_release_time[:_FEATURED_LIMIT]
+    recent = by_release_time[:_RECENT_LIMIT]
+    popular = [
+        card
+        for card in sorted(
+            with_release, key=lambda card: (card["downloads"], card["released_at"] or 0), reverse=True
+        )
+        if card["downloads"] > 0
+    ][:_POPULAR_LIMIT]
 
     return templates.TemplateResponse(
         request,
         "index.html",
-        {"cards": cards, "total": len(cards)},
+        {
+            "cards": cards,
+            "featured": featured,
+            "recent": recent,
+            "popular": popular,
+            "total": len(cards),
+            "release_total": db.query_value(
+                "SELECT COUNT(*) FROM releases r JOIN apps a ON a.id = r.app_id"
+                " WHERE a.enabled = 1"
+            )
+            or 0,
+            "downloads_30d": sum(card["downloads"] for card in cards),
+        },
         headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-cache"},
     )
 
 
 @router.get("/favicon.ico")
 def favicon() -> Response:
-    return Response(status_code=204)
+    # 用同一枚品牌 logo 作为 favicon，浏览器直接请求 /favicon.ico 时也能拿到图片。
+    return FileResponse(
+        config.STATIC_DIR / "logo.png",
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @router.get("/health")

@@ -106,6 +106,9 @@ app = FastAPI(
 #   <img src="/media/images/xxxx.png">
 app.mount("/media", StaticFiles(directory=str(config.UPLOAD_DIR)), name="media")
 
+# /static 是随代码发布的品牌资源（logo 等），不放进 data/uploads，避免被清理脚本误删。
+app.mount("/static", StaticFiles(directory=str(config.STATIC_DIR)), name="static")
+
 @app.exception_handler(StarletteHTTPException)
 async def http_error_envelope(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     """/api/** 统一成 {"error": ...}（docs/api.md 承诺的契约）；其余路径保持 FastAPI 默认的

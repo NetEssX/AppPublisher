@@ -455,6 +455,33 @@ def main() -> int:
             human_size_fn(len(APK_BYTES)) in client.get("/").text,
             human_size_fn(len(APK_BYTES)),
         )
+        home = client.get("/").text
+        check(
+            "首页采用应用市场推荐布局",
+            'id="featured"' in home and "最近更新" in home and "全部应用" in home,
+        )
+        check(
+            "首页轮播展示最近发布的应用",
+            'class="showcase-slide' in home and "QUT课表" in home and "badge-new" in home,
+        )
+        check(
+            "首页带搜索框与统计条",
+            'id="app-search"' in home and "近 30 天下载" in home,
+        )
+        check("首页使用品牌 logo", 'src="/static/logo.png"' in home)
+        logo = client.get("/static/logo.png")
+        check(
+            "品牌 logo 可访问",
+            logo.status_code == 200
+            and logo.headers.get("content-type") == "image/png"
+            and logo.content.startswith(b"\x89PNG"),
+        )
+        favicon = client.get("/favicon.ico")
+        check(
+            "favicon 使用品牌 logo",
+            favicon.status_code == 200
+            and favicon.headers.get("content-type") == "image/png",
+        )
         check(
             "分页在禁用 JS 时有展开回退",
             "<noscript>" in detail.text and ".panel[hidden]" in detail.text,

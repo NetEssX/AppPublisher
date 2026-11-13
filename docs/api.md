@@ -210,7 +210,7 @@ curl -X POST   "$BASE/api/v1/apps/QUTSchedule/banner" -H "Authorization: Bearer 
 curl -X DELETE "$BASE/api/v1/apps/QUTSchedule/banner" -H "Authorization: Bearer $K"
 ```
 
-封面显示在根页卡片顶部，建议 16:9。
+封面显示在首页推荐轮播和卡片顶部，建议 16:9。
 **不接受 `.svg`**（会被浏览器当文档内联渲染，其中的脚本能在本站源下执行）。
 上传成功后把返回的 `url` 填进 `intro_html` 即可引用。
 

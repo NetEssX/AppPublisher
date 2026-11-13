@@ -31,6 +31,29 @@ def format_time(ms: Optional[int]) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ms / 1000))
 
 
+def relative_time(ms: Optional[int]) -> str:
+    """首页「最近更新」用的相对时间：刚刚 / N 分钟前 / N 小时前 / N 天前。
+
+    超过 30 天就退回日期，避免出现「437 天前」这种没有信息量的文案。
+    未来时间（时钟不同步或测试数据）直接显示绝对时间，不显示「-3 分钟前」。
+    """
+    if ms is None:
+        return "-"
+    diff = now_ms() - int(ms)
+    if diff < 0:
+        return format_time(ms)
+    seconds = diff // 1000
+    if seconds < 60:
+        return "刚刚"
+    if seconds < 3600:
+        return f"{seconds // 60} 分钟前"
+    if seconds < 86400:
+        return f"{seconds // 3600} 小时前"
+    if seconds < 30 * 86400:
+        return f"{seconds // 86400} 天前"
+    return time.strftime("%Y-%m-%d", time.localtime(int(ms) / 1000))
+
+
 def redirect_with(url: str, ok: Optional[str] = None, err: Optional[str] = None) -> RedirectResponse:
     """303 跳转，并附带一条提示消息（走查询串，无需 session 存储）。"""
     params = {}

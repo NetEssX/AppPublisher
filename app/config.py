@@ -61,6 +61,8 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 BUILD_DIR = UPLOAD_DIR / "build"
 IMAGE_DIR = UPLOAD_DIR / "images"
 DB_PATH = _path_env("APPPUBLISHER_DB", DATA_DIR / "apppublisher.db")
+# 随代码发布的静态资源（站点 logo 等），和用户上传的 data/uploads 分开。
+STATIC_DIR = BASE_DIR / "app" / "static"
 
 # ---------------------------------------------------------------- 对外地址
 # 留空则按请求的 Host 动态推断，适合单机部署；放在反向代理后面时请显式设置。
